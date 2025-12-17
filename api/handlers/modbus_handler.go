@@ -4,23 +4,29 @@ import (
 	"net/http"
 	"strconv"
 
+	"aoi-backend/internal/core/logger"
 	"aoi-backend/internal/domain"
 	"aoi-backend/internal/repository"
+	"aoi-backend/internal/scheduler"
+
 	"github.com/gin-gonic/gin"
 )
 
 type ModbusHandler struct {
-	rtuRepo repository.ModbusRTURepository
-	tcpRepo repository.ModbusTCPRepository
+	rtuRepo          repository.ModbusRTURepository
+	tcpRepo          repository.ModbusTCPRepository
+	schedulerManager *scheduler.SchedulerManager
 }
 
 func NewModbusHandler(
 	rtuRepo repository.ModbusRTURepository,
 	tcpRepo repository.ModbusTCPRepository,
+	schedulerManager *scheduler.SchedulerManager,
 ) *ModbusHandler {
 	return &ModbusHandler{
-		rtuRepo: rtuRepo,
-		tcpRepo: tcpRepo,
+		rtuRepo:          rtuRepo,
+		tcpRepo:          tcpRepo,
+		schedulerManager: schedulerManager,
 	}
 }
 
@@ -93,6 +99,12 @@ func (h *ModbusHandler) CreateRTU(c *gin.Context) {
 		return
 	}
 
+	// Reload scheduler to pick up new Modbus RTU config
+	if h.schedulerManager != nil {
+		logger.GetLogger().Info("Reloading scheduler after Modbus RTU config creation")
+		h.schedulerManager.Reload()
+	}
+
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
 		"data":    config,
@@ -127,6 +139,12 @@ func (h *ModbusHandler) UpdateRTU(c *gin.Context) {
 		return
 	}
 
+	// Reload scheduler to pick up updated Modbus RTU config
+	if h.schedulerManager != nil {
+		logger.GetLogger().Info("Reloading scheduler after Modbus RTU config update")
+		h.schedulerManager.Reload()
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data":    config,
@@ -149,6 +167,12 @@ func (h *ModbusHandler) DeleteRTU(c *gin.Context) {
 			"error":   err.Error(),
 		})
 		return
+	}
+
+	// Reload scheduler to remove deleted Modbus RTU config
+	if h.schedulerManager != nil {
+		logger.GetLogger().Info("Reloading scheduler after Modbus RTU config deletion")
+		h.schedulerManager.Reload()
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -231,6 +255,12 @@ func (h *ModbusHandler) CreateTCP(c *gin.Context) {
 		return
 	}
 
+	// Reload scheduler to pick up new Modbus TCP config
+	if h.schedulerManager != nil {
+		logger.GetLogger().Info("Reloading scheduler after Modbus TCP config creation")
+		h.schedulerManager.Reload()
+	}
+
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
 		"data":    config,
@@ -265,6 +295,12 @@ func (h *ModbusHandler) UpdateTCP(c *gin.Context) {
 		return
 	}
 
+	// Reload scheduler to pick up updated Modbus TCP config
+	if h.schedulerManager != nil {
+		logger.GetLogger().Info("Reloading scheduler after Modbus TCP config update")
+		h.schedulerManager.Reload()
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data":    config,
@@ -289,9 +325,14 @@ func (h *ModbusHandler) DeleteTCP(c *gin.Context) {
 		return
 	}
 
+	// Reload scheduler to remove deleted Modbus TCP config
+	if h.schedulerManager != nil {
+		logger.GetLogger().Info("Reloading scheduler after Modbus TCP config deletion")
+		h.schedulerManager.Reload()
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Modbus TCP config deleted successfully",
 	})
 }
-

@@ -6,18 +6,23 @@ import (
 	"strconv"
 
 	"aoi-backend/internal/core/errors"
+	"aoi-backend/internal/core/logger"
 	"aoi-backend/internal/domain"
+	"aoi-backend/internal/scheduler"
 	"aoi-backend/internal/service"
+
 	"github.com/gin-gonic/gin"
 )
 
 type ParameterHandler struct {
-	service service.ParameterService
+	service          service.ParameterService
+	schedulerManager *scheduler.SchedulerManager
 }
 
-func NewParameterHandler(service service.ParameterService) *ParameterHandler {
+func NewParameterHandler(service service.ParameterService, schedulerManager *scheduler.SchedulerManager) *ParameterHandler {
 	return &ParameterHandler{
-		service: service,
+		service:          service,
+		schedulerManager: schedulerManager,
 	}
 }
 
@@ -100,6 +105,12 @@ func (h *ParameterHandler) Create(c *gin.Context) {
 		return
 	}
 
+	// Reload scheduler to pick up new parameter
+	if h.schedulerManager != nil {
+		logger.GetLogger().Info("Reloading scheduler after parameter creation")
+		h.schedulerManager.Reload()
+	}
+
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
 		"data":    param,
@@ -140,6 +151,12 @@ func (h *ParameterHandler) Update(c *gin.Context) {
 		return
 	}
 
+	// Reload scheduler to pick up updated parameter
+	if h.schedulerManager != nil {
+		logger.GetLogger().Info("Reloading scheduler after parameter update")
+		h.schedulerManager.Reload()
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data":    param,
@@ -171,9 +188,14 @@ func (h *ParameterHandler) Delete(c *gin.Context) {
 		return
 	}
 
+	// Reload scheduler to remove deleted parameter
+	if h.schedulerManager != nil {
+		logger.GetLogger().Info("Reloading scheduler after parameter deletion")
+		h.schedulerManager.Reload()
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Parameter deleted successfully",
 	})
 }
-

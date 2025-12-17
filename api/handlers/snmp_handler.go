@@ -4,18 +4,23 @@ import (
 	"net/http"
 	"strconv"
 
+	"aoi-backend/internal/core/logger"
 	"aoi-backend/internal/domain"
 	"aoi-backend/internal/repository"
+	"aoi-backend/internal/scheduler"
+
 	"github.com/gin-gonic/gin"
 )
 
 type SNMPHandler struct {
-	repo repository.SNMPRepository
+	repo             repository.SNMPRepository
+	schedulerManager *scheduler.SchedulerManager
 }
 
-func NewSNMPHandler(repo repository.SNMPRepository) *SNMPHandler {
+func NewSNMPHandler(repo repository.SNMPRepository, schedulerManager *scheduler.SchedulerManager) *SNMPHandler {
 	return &SNMPHandler{
-		repo: repo,
+		repo:             repo,
+		schedulerManager: schedulerManager,
 	}
 }
 
@@ -78,6 +83,12 @@ func (h *SNMPHandler) Create(c *gin.Context) {
 		return
 	}
 
+	// Reload scheduler to pick up new SNMP config
+	if h.schedulerManager != nil {
+		logger.GetLogger().Info("Reloading scheduler after SNMP config creation")
+		h.schedulerManager.Reload()
+	}
+
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
 		"data":    config,
@@ -112,6 +123,12 @@ func (h *SNMPHandler) Update(c *gin.Context) {
 		return
 	}
 
+	// Reload scheduler to pick up updated SNMP config
+	if h.schedulerManager != nil {
+		logger.GetLogger().Info("Reloading scheduler after SNMP config update")
+		h.schedulerManager.Reload()
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data":    config,
@@ -136,9 +153,14 @@ func (h *SNMPHandler) Delete(c *gin.Context) {
 		return
 	}
 
+	// Reload scheduler to remove deleted SNMP config
+	if h.schedulerManager != nil {
+		logger.GetLogger().Info("Reloading scheduler after SNMP config deletion")
+		h.schedulerManager.Reload()
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "SNMP config deleted successfully",
 	})
 }
-

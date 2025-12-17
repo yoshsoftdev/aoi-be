@@ -112,6 +112,7 @@ func main() {
 		snmpRepo,
 		cacheInstance,
 		wsHub,
+		schedulerManager,
 	)
 
 	// Start server

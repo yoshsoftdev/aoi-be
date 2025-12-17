@@ -3,17 +3,24 @@ package handlers
 import (
 	"aoi-backend/internal/core/database"
 	"aoi-backend/internal/core/errors"
+	"aoi-backend/internal/core/logger"
 	"aoi-backend/internal/domain"
+	"aoi-backend/internal/scheduler"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
 
-type MappingHandler struct{}
+type MappingHandler struct {
+	schedulerManager *scheduler.SchedulerManager
+}
 
-func NewMappingHandler() *MappingHandler {
-	return &MappingHandler{}
+func NewMappingHandler(schedulerManager *scheduler.SchedulerManager) *MappingHandler {
+	return &MappingHandler{
+		schedulerManager: schedulerManager,
+	}
 }
 
 // SaveMappingRequest represents the request payload for saving connection and mappings
@@ -175,6 +182,25 @@ func (h *MappingHandler) Save(c *gin.Context) {
 			"error":   "Failed to commit transaction: " + err.Error(),
 		})
 		return
+	}
+
+	// Reload scheduler to pick up new parameters
+	if h.schedulerManager != nil {
+		logger.GetLogger().Info("Reloading scheduler after mapping save")
+		h.schedulerManager.Reload()
+		
+		// Trigger immediate execution for newly created parameters
+		// This ensures data appears in dashboard immediately
+		go func() {
+			// Wait a bit for scheduler to finish reloading
+			time.Sleep(200 * time.Millisecond)
+			
+			// Trigger immediate execution for each new parameter
+			for _, param := range createdParams {
+				logger.GetLogger().Infof("Triggering immediate execution for parameter %d (type: %s)", param.ID, param.Type)
+				h.schedulerManager.TriggerImmediateExecution(param.ID, param.Type)
+			}
+		}()
 	}
 
 	c.JSON(http.StatusCreated, gin.H{

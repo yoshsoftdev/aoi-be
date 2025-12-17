@@ -8,17 +8,18 @@ import (
 	"aoi-backend/internal/core/database"
 	"aoi-backend/internal/domain"
 	"aoi-backend/internal/worker"
+
 	"github.com/robfig/cron/v3"
 	"gorm.io/gorm"
 )
 
 type SchedulerManager struct {
-	cron        *cron.Cron
-	jobs        map[string]cron.EntryID
+	cron            *cron.Cron
+	jobs            map[string]cron.EntryID
 	modbusRTUWorker *worker.ModbusRTUWorker
 	modbusTCPWorker *worker.ModbusTCPWorker
 	snmpWorker      *worker.SNMPWorker
-	db          *gorm.DB
+	db              *gorm.DB
 }
 
 func NewSchedulerManager(
@@ -92,7 +93,7 @@ func (s *SchedulerManager) getPollingMs(paramPollingMs *int, param *domain.Param
 
 func (s *SchedulerManager) ScheduleModbusRTU(configID uint, pollingMs int) {
 	jobID := fmt.Sprintf("modbus_rtu_%d", configID)
-	
+
 	// Remove existing job if any
 	if entryID, exists := s.jobs[jobID]; exists {
 		s.cron.Remove(entryID)
@@ -120,7 +121,7 @@ func (s *SchedulerManager) ScheduleModbusRTU(configID uint, pollingMs int) {
 
 func (s *SchedulerManager) ScheduleModbusTCP(configID uint, pollingMs int) {
 	jobID := fmt.Sprintf("modbus_tcp_%d", configID)
-	
+
 	// Remove existing job if any
 	if entryID, exists := s.jobs[jobID]; exists {
 		s.cron.Remove(entryID)
@@ -148,7 +149,7 @@ func (s *SchedulerManager) ScheduleModbusTCP(configID uint, pollingMs int) {
 
 func (s *SchedulerManager) ScheduleSNMP(configID uint, pollingMs int) {
 	jobID := fmt.Sprintf("snmp_%d", configID)
-	
+
 	// Remove existing job if any
 	if entryID, exists := s.jobs[jobID]; exists {
 		s.cron.Remove(entryID)
@@ -181,3 +182,46 @@ func (s *SchedulerManager) RemoveJob(jobID string) {
 	}
 }
 
+// Reload reloads all scheduled jobs from database
+// This should be called after parameter/modbus/snmp config changes
+func (s *SchedulerManager) Reload() {
+	// Remove all existing jobs
+	for jobID, entryID := range s.jobs {
+		s.cron.Remove(entryID)
+		delete(s.jobs, jobID)
+	}
+
+	// Reload and schedule all configurations
+	s.loadAndScheduleAll()
+}
+
+// TriggerImmediateExecution triggers immediate execution for a parameter
+// This is useful after creating new parameters to get data immediately
+func (s *SchedulerManager) TriggerImmediateExecution(parameterID uint, paramType string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	switch paramType {
+	case "modbus_rtu":
+		var modbusRTU domain.ModbusRTU
+		if err := s.db.Where("id_parameter = ?", parameterID).First(&modbusRTU).Error; err == nil {
+			if err := s.modbusRTUWorker.Execute(ctx, modbusRTU.ID); err != nil {
+				fmt.Printf("Failed to execute Modbus RTU for parameter %d: %v\n", parameterID, err)
+			}
+		}
+	case "modbus_tcp":
+		var modbusTCP domain.ModbusTCP
+		if err := s.db.Where("id_parameter = ?", parameterID).First(&modbusTCP).Error; err == nil {
+			if err := s.modbusTCPWorker.Execute(ctx, modbusTCP.ID); err != nil {
+				fmt.Printf("Failed to execute Modbus TCP for parameter %d: %v\n", parameterID, err)
+			}
+		}
+	case "snmp":
+		var snmpConfig domain.SNMPConfig
+		if err := s.db.Where("id_parameter = ?", parameterID).First(&snmpConfig).Error; err == nil {
+			if err := s.snmpWorker.Execute(ctx, snmpConfig.ID); err != nil {
+				fmt.Printf("Failed to execute SNMP for parameter %d: %v\n", parameterID, err)
+			}
+		}
+	}
+}

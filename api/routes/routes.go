@@ -5,6 +5,7 @@ import (
 	"aoi-backend/api/middleware"
 	"aoi-backend/internal/core/cache"
 	"aoi-backend/internal/repository"
+	"aoi-backend/internal/scheduler"
 	"aoi-backend/internal/service"
 	"aoi-backend/internal/worker"
 
@@ -19,6 +20,7 @@ func SetupRoutes(
 	snmpRepo repository.SNMPRepository,
 	cache cache.Cache,
 	wsHub *worker.WebSocketHub,
+	schedulerManager *scheduler.SchedulerManager,
 ) *gin.Engine {
 	router := gin.Default()
 
@@ -43,10 +45,10 @@ func SetupRoutes(
 		}
 
 		// Modbus RTU
-		modbusHandler := handlers.NewModbusHandler(modbusRTURepo, modbusTCPRepo)
+		modbusHandler := handlers.NewModbusHandler(modbusRTURepo, modbusTCPRepo, schedulerManager)
 
 		// Parameters
-		paramHandler := handlers.NewParameterHandler(paramService)
+		paramHandler := handlers.NewParameterHandler(paramService, schedulerManager)
 		params := v1.Group("/parameters")
 		{
 			params.GET("", paramHandler.GetAll)
@@ -76,7 +78,7 @@ func SetupRoutes(
 		}
 
 		// SNMP
-		snmpHandler := handlers.NewSNMPHandler(snmpRepo)
+		snmpHandler := handlers.NewSNMPHandler(snmpRepo, schedulerManager)
 		snmp := v1.Group("/snmp")
 		{
 			snmp.GET("", snmpHandler.GetAll)
@@ -99,7 +101,7 @@ func SetupRoutes(
 		v1.GET("/ws", wsHandler.Handle)
 
 		// Mapping
-		mappingHandler := handlers.NewMappingHandler()
+		mappingHandler := handlers.NewMappingHandler(schedulerManager)
 		mapping := v1.Group("/mapping")
 		{
 			mapping.POST("/save", mappingHandler.Save)
@@ -108,4 +110,3 @@ func SetupRoutes(
 
 	return router
 }
-
