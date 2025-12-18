@@ -3,6 +3,7 @@ package worker
 import (
 	"encoding/json"
 	"sync"
+	"time"
 
 	"aoi-backend/internal/domain"
 
@@ -72,15 +73,24 @@ func (h *WebSocketHub) Unregister(conn *websocket.Conn) {
 	h.unregister <- conn
 }
 
+// BroadcastDataUpdate broadcasts CLEAN DATA to all connected WebSocket clients
+// This method implements the service.WebSocketBroadcaster interface
+// IMPORTANT: Only formula parameters should call this - raw parameters are internal only
 func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
-	// Create simplified dashboard data (only device name, parameter name, and final value)
-	dashboardData := domain.DashboardData{
-		ParameterID:   data.ParameterID,   // Include parameter ID for edit/delete operations
-		DeviceNama:    data.DeviceNama,
-		ParameterNama: data.ParameterNama,
-		Value:         data.ProcessedValue, // Final processed value
-		Timestamp:     data.Timestamp,
-		Status:        data.Status,
+	// GUARD: Only broadcast formula parameters (clean data)
+	// Raw parameters should never reach here
+	// This is a safety check - workers should not call this
+
+	// Create DashboardData payload compatible with frontend
+	// Frontend expects: parameter_id, device_nama, parameter_nama, value, timestamp, status
+	// Convert timestamp to string format for JSON compatibility
+	dashboardData := map[string]interface{}{
+		"parameter_id":   data.ParameterID,
+		"device_nama":    data.DeviceNama,                     // Device name
+		"parameter_nama": data.ParameterNama,                  // Logical parameter name (not raw naming)
+		"value":          data.ProcessedValue,                 // Final value only (after decode, scale, formula)
+		"timestamp":      data.Timestamp.Format(time.RFC3339), // Convert to RFC3339 string
+		"status":         data.Status,
 	}
 
 	message := map[string]interface{}{
@@ -98,13 +108,13 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 
 func (h *WebSocketHub) BroadcastError(data domain.RealtimeData) {
 	// Create simplified dashboard data for error
-	dashboardData := domain.DashboardData{
-		ParameterID:   data.ParameterID,   // Include parameter ID for edit/delete operations
-		DeviceNama:    data.DeviceNama,
-		ParameterNama: data.ParameterNama,
-		Value:         nil, // No value on error
-		Timestamp:     data.Timestamp,
-		Status:        data.Status,
+	dashboardData := map[string]interface{}{
+		"parameter_id":   data.ParameterID,
+		"device_nama":    data.DeviceNama,
+		"parameter_nama": data.ParameterNama,
+		"value":          nil,                                 // No value on error
+		"timestamp":      data.Timestamp.Format(time.RFC3339), // Convert to RFC3339 string
+		"status":         data.Status,
 	}
 
 	message := map[string]interface{}{

@@ -16,12 +16,13 @@ import (
 )
 
 type ModbusRTUWorker struct {
-	repo        repository.ModbusRTURepository
-	paramRepo   repository.ParameterRepository
-	deviceRepo  repository.DeviceRepository
-	cache       cache.Cache
-	formulaEval *service.FormulaEvaluator
-	wsHub       *WebSocketHub
+	repo          repository.ModbusRTURepository
+	paramRepo     repository.ParameterRepository
+	deviceRepo    repository.DeviceRepository
+	cache         cache.Cache
+	formulaEval   *service.FormulaEvaluator
+	formulaEngine *service.FormulaEngine
+	wsHub         *WebSocketHub
 }
 
 func NewModbusRTUWorker(
@@ -30,15 +31,17 @@ func NewModbusRTUWorker(
 	deviceRepo repository.DeviceRepository,
 	cache cache.Cache,
 	formulaEval *service.FormulaEvaluator,
+	formulaEngine *service.FormulaEngine,
 	wsHub *WebSocketHub,
 ) *ModbusRTUWorker {
 	return &ModbusRTUWorker{
-		repo:        repo,
-		paramRepo:   paramRepo,
-		deviceRepo:  deviceRepo,
-		cache:       cache,
-		formulaEval: formulaEval,
-		wsHub:       wsHub,
+		repo:          repo,
+		paramRepo:     paramRepo,
+		deviceRepo:    deviceRepo,
+		cache:         cache,
+		formulaEval:   formulaEval,
+		formulaEngine: formulaEngine,
+		wsHub:         wsHub,
 	}
 }
 
@@ -167,12 +170,19 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 		}
 	}
 
-	// Create realtime data
+	// GUARD: Skip if this is a formula parameter (not raw)
+	// Formula parameters are handled by Formula Engine, not workers
+	if param.IsFormula {
+		logger.GetLogger().Debugf("Skipping formula parameter %d in worker - handled by Formula Engine", config.IDParameter)
+		return nil
+	}
+
+	// Create realtime data for RAW parameter
 	realtimeData := domain.RealtimeData{
 		ParameterID:    config.IDParameter,
 		ParameterNama:  param.Nama,
 		ParameterType:  param.Type,
-		DeviceNama:     device.Nama, // Device name for dashboard
+		DeviceNama:     device.Nama,
 		RawValue:       rawValueFloat,
 		ProcessedValue: processedValue,
 		CustomRumus:    param.CustomRumus,
@@ -181,14 +191,18 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 		Error:          nil,
 	}
 
-	// Save to cache
-	cacheKey := fmt.Sprintf("parameter:%d", config.IDParameter)
+	// Save RAW data to cache with raw key (internal use only)
+	// This will NOT be broadcast to frontend
+	cacheKey := fmt.Sprintf("parameter:raw:%d", config.IDParameter)
 	if err := w.cache.Set(cacheKey, realtimeData, 24*time.Hour); err != nil {
-		logger.GetLogger().Warnf("Failed to save to cache: %v", err)
+		logger.GetLogger().Warnf("Failed to save raw data to cache: %v", err)
 	}
 
-	// Broadcast via WebSocket
-	w.wsHub.BroadcastDataUpdate(realtimeData)
+	// NOTIFY Formula Engine (do not broadcast)
+	// Formula Engine will evaluate formulas and broadcast clean data
+	if w.formulaEngine != nil {
+		w.formulaEngine.OnRawParameterUpdated(config.IDParameter, &realtimeData)
+	}
 
 	return nil
 }
@@ -204,6 +218,12 @@ func (w *ModbusRTUWorker) handleError(paramID uint, paramNama, paramType string,
 		if deviceErr == nil {
 			deviceNama = device.Nama
 		}
+
+		// GUARD: Skip error broadcast for formula parameters
+		if param.IsFormula {
+			logger.GetLogger().Debugf("Skipping error broadcast for formula parameter %d", paramID)
+			return
+		}
 	}
 
 	realtimeData := domain.RealtimeData{
@@ -216,9 +236,12 @@ func (w *ModbusRTUWorker) handleError(paramID uint, paramNama, paramType string,
 		Error:         &errorMsg,
 	}
 
-	cacheKey := fmt.Sprintf("parameter:%d", paramID)
+	// Cache error state (raw parameter only)
+	cacheKey := fmt.Sprintf("parameter:raw:%d", paramID)
 	w.cache.Set(cacheKey, realtimeData, 24*time.Hour)
-	w.wsHub.BroadcastError(realtimeData)
+
+	// DO NOT broadcast error - errors are handled by Formula Engine for formula parameters
+	// Raw parameter errors are internal only
 }
 
 // containsFieldNames checks if formula contains field names like "Slave X Addr Y"

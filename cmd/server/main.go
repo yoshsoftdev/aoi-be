@@ -55,6 +55,7 @@ func main() {
 	modbusRTURepo := repository.NewModbusRTURepository()
 	modbusTCPRepo := repository.NewModbusTCPRepository()
 	snmpRepo := repository.NewSNMPRepository()
+	formulaRepo := repository.NewFormulaRepository()
 
 	// Initialize services
 	deviceService := service.NewDeviceService(deviceRepo)
@@ -66,13 +67,29 @@ func main() {
 	go wsHub.Run()
 	log.Info("WebSocket hub started")
 
-	// Initialize workers
+	// Initialize Formula Engine
+	formulaEngine := service.NewFormulaEngine(
+		formulaRepo,
+		paramRepo,
+		cacheInstance,
+		wsHub,
+	)
+
+	// Load all formulas from database
+	if err := formulaEngine.LoadAll(); err != nil {
+		log.Warnf("Failed to load formulas: %v", err)
+	} else {
+		log.Info("Formula engine initialized and loaded")
+	}
+
+	// Initialize workers (pass formulaEngine for reactive formula evaluation)
 	modbusRTUWorker := worker.NewModbusRTUWorker(
 		modbusRTURepo,
 		paramRepo,
 		deviceRepo,
 		cacheInstance,
 		formulaEval,
+		formulaEngine,
 		wsHub,
 	)
 
@@ -82,6 +99,7 @@ func main() {
 		deviceRepo,
 		cacheInstance,
 		formulaEval,
+		formulaEngine,
 		wsHub,
 	)
 
@@ -91,6 +109,7 @@ func main() {
 		deviceRepo,
 		cacheInstance,
 		formulaEval,
+		formulaEngine,
 		wsHub,
 	)
 
@@ -150,6 +169,8 @@ func runMigrations() error {
 		&domain.AnalogOutput{},
 		&domain.DigitalInput{},
 		&domain.DigitalOutput{},
+		&domain.ParameterFormula{},
+		&domain.ParameterFormulaVar{},
 	); err != nil {
 		return err
 	}

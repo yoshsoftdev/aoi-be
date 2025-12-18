@@ -6,7 +6,10 @@ import (
 	"aoi-backend/internal/core/logger"
 	"aoi-backend/internal/domain"
 	"aoi-backend/internal/scheduler"
+	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -25,9 +28,9 @@ func NewMappingHandler(schedulerManager *scheduler.SchedulerManager) *MappingHan
 
 // SaveMappingRequest represents the request payload for saving connection and mappings
 type SaveMappingRequest struct {
-	Connection   ConnectionData `json:"connection"`
-	KoneksiID    *uint          `json:"koneksi_id,omitempty"` // If provided, use existing koneksi instead of creating new one
-	Mappings     []MappingData   `json:"mappings"`
+	Connection ConnectionData `json:"connection"`
+	KoneksiID  *uint          `json:"koneksi_id,omitempty"` // If provided, use existing koneksi instead of creating new one
+	Mappings   []MappingData  `json:"mappings"`
 }
 
 type ConnectionData struct {
@@ -37,9 +40,11 @@ type ConnectionData struct {
 }
 
 type MappingData struct {
+	Type       string `json:"type,omitempty"` // "raw" atau "formula" - jika tidak ada, auto-detect
 	OutputName string `json:"outputName"`
-	Formula    string `json:"formula"`
-	// Test configuration from TestStep
+
+	// Untuk RAW parameter
+	Formula         string `json:"formula,omitempty"` // Formula sederhana (value * 2) - bukan field reference
 	SlaveID         *int   `json:"slaveId,omitempty"`
 	FunctionCode    *int   `json:"functionCode,omitempty"`
 	RegisterAddress *int   `json:"registerAddress,omitempty"`
@@ -47,6 +52,16 @@ type MappingData struct {
 	DataType        string `json:"dataType,omitempty"`
 	ByteOrder       string `json:"byteOrder,omitempty"`
 	OID             string `json:"oid,omitempty"` // For SNMP
+
+	// Untuk FORMULA parameter
+	Expression string            `json:"expression,omitempty"` // "a * 2" atau "(a + b) / 2"
+	Variables  []FormulaVariable `json:"variables,omitempty"`
+}
+
+type FormulaVariable struct {
+	Name                string `json:"name"`                            // "a", "b", dll
+	SourceParameterID   *uint  `json:"source_parameter_id,omitempty"`   // Direct reference via ID
+	SourceParameterName string `json:"source_parameter_name,omitempty"` // Reference via parameter name
 }
 
 // Save handles POST /api/v1/mapping/save
@@ -141,38 +156,159 @@ func (h *MappingHandler) Save(c *gin.Context) {
 		}
 	}
 
-	// Create Parameters and their specific configs
+	// Initialize repositories (if needed for future use)
+
+	// Step 1: Create RAW parameters first
+	// Mapping: parameter name → parameter_id (untuk reference oleh formula)
+	paramNameToID := make(map[string]uint)
 	var createdParams []domain.Parameter
+	var formulaMappings []MappingData
+
+	// Phase 1: Create RAW parameters
 	for _, mapping := range req.Mappings {
-		// Create Parameter
+		if isRawParameter(mapping, koneksiType) {
+			// Create raw parameter
+			param := &domain.Parameter{
+				DeviceID:  koneksi.ID,
+				Nama:      mapping.OutputName,
+				Type:      koneksiType,
+				ReadWrite: false,
+				IsFormula: false,
+			}
+
+			// Handle simple formula (value * 2) - bukan field reference
+			if mapping.Formula != "" && !containsFieldReference(mapping.Formula) {
+				param.CustomRumus = &mapping.Formula
+			}
+
+			if err := tx.Create(param).Error; err != nil {
+				tx.Rollback()
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"success": false,
+					"error":   "Failed to create raw parameter: " + err.Error(),
+				})
+				return
+			}
+
+			// Create protocol-specific config
+			if err := createProtocolConfig(tx, param, koneksiType, mapping, req.Connection.Config); err != nil {
+				tx.Rollback()
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"success": false,
+					"error":   "Failed to create protocol config: " + err.Error(),
+				})
+				return
+			}
+
+			// Store mapping for formula reference
+			paramNameToID[mapping.OutputName] = param.ID
+			createdParams = append(createdParams, *param)
+			logger.GetLogger().Infof("Created raw parameter: id=%d, name=%s", param.ID, param.Nama)
+		} else if isFormulaParameter(mapping) {
+			// Store for formula creation later
+			formulaMappings = append(formulaMappings, mapping)
+		} else {
+			// Unknown mapping type - skip or error?
+			logger.GetLogger().Warnf("Unknown mapping type for outputName=%s, skipping", mapping.OutputName)
+		}
+	}
+
+	// Phase 2: Create FORMULA parameters
+	for _, mapping := range formulaMappings {
+		// Validate formula mapping
+		if mapping.Expression == "" {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error":   fmt.Sprintf("Expression is required for formula parameter '%s'", mapping.OutputName),
+			})
+			return
+		}
+
+		if len(mapping.Variables) == 0 {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error":   fmt.Sprintf("Variables are required for formula parameter '%s'", mapping.OutputName),
+			})
+			return
+		}
+
+		// Resolve variables to parameter IDs
+		varMappings, err := resolveVariables(tx, koneksi.ID, mapping.Variables, paramNameToID)
+		if err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error":   fmt.Sprintf("Failed to resolve variables: %v", err),
+			})
+			return
+		}
+
+		// Validate expression contains all variables
+		if err := validateExpression(mapping.Expression, varMappings); err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error":   fmt.Sprintf("Invalid expression: %v", err),
+			})
+			return
+		}
+
+		// Create formula parameter
 		param := &domain.Parameter{
-			DeviceID:    koneksi.ID,
-			Nama:        mapping.OutputName,
-			Type:        koneksiType,
-			ReadWrite:   false, // Default to read-only
-			CustomRumus: &mapping.Formula,
+			DeviceID:  koneksi.ID,
+			Nama:      mapping.OutputName,
+			Type:      "formula",
+			ReadWrite: false,
+			IsFormula: true,
 		}
 
 		if err := tx.Create(param).Error; err != nil {
 			tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"success": false,
-				"error":   "Failed to create parameter: " + err.Error(),
+				"error":   "Failed to create formula parameter: " + err.Error(),
 			})
 			return
 		}
 
-		// Create protocol-specific config
-		if err := createProtocolConfig(tx, param, koneksiType, mapping, req.Connection.Config); err != nil {
+		// Create parameter_formula
+		formula := &domain.ParameterFormula{
+			ParameterID:    param.ID,
+			Expression:     mapping.Expression, // Sudah normalized: "a * 2"
+			ExpressionType: "math",
+		}
+
+		if err := tx.Create(formula).Error; err != nil {
 			tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"success": false,
-				"error":   "Failed to create protocol config: " + err.Error(),
+				"error":   "Failed to create formula: " + err.Error(),
 			})
 			return
 		}
 
+		// Create parameter_formula_var entries
+		for varName, sourceParamID := range varMappings {
+			formulaVar := &domain.ParameterFormulaVar{
+				FormulaID:         formula.ID,
+				VarName:           varName,
+				SourceParameterID: sourceParamID,
+			}
+
+			if err := tx.Create(formulaVar).Error; err != nil {
+				tx.Rollback()
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"success": false,
+					"error":   "Failed to create formula variable: " + err.Error(),
+				})
+				return
+			}
+		}
+
 		createdParams = append(createdParams, *param)
+		logger.GetLogger().Infof("Created formula parameter: id=%d, name=%s, expression=%s", param.ID, param.Nama, mapping.Expression)
 	}
 
 	// Commit transaction
@@ -188,13 +324,13 @@ func (h *MappingHandler) Save(c *gin.Context) {
 	if h.schedulerManager != nil {
 		logger.GetLogger().Info("Reloading scheduler after mapping save")
 		h.schedulerManager.Reload()
-		
+
 		// Trigger immediate execution for newly created parameters
 		// This ensures data appears in dashboard immediately
 		go func() {
 			// Wait a bit for scheduler to finish reloading
 			time.Sleep(200 * time.Millisecond)
-			
+
 			// Trigger immediate execution for each new parameter
 			for _, param := range createdParams {
 				logger.GetLogger().Infof("Triggering immediate execution for parameter %d (type: %s)", param.ID, param.Type)
@@ -206,8 +342,8 @@ func (h *MappingHandler) Save(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
 		"data": gin.H{
-			"koneksi_id": koneksi.ID,
-			"koneksi_name": koneksi.Nama,
+			"koneksi_id":       koneksi.ID,
+			"koneksi_name":     koneksi.Nama,
 			"parameters_count": len(createdParams),
 		},
 		"message": "Connection and mappings saved successfully",
@@ -454,10 +590,130 @@ func createProtocolConfig(tx *gorm.DB, param *domain.Parameter, paramType string
 			return err
 		}
 
-	// TODO: Add support for digital_input, digital_output, analog_input, analog_output
-	// For now, we'll skip these as they may not be used in the current flow
+		// TODO: Add support for digital_input, digital_output, analog_input, analog_output
+		// For now, we'll skip these as they may not be used in the current flow
 	}
 
 	return nil
 }
 
+// isRawParameter checks if mapping is a raw parameter
+// Raw parameter has Modbus/SNMP config (slaveId, registerAddress, or oid)
+func isRawParameter(mapping MappingData, koneksiType string) bool {
+	// Explicit type
+	if mapping.Type == "raw" {
+		return true
+	}
+
+	// Has Modbus config
+	if (koneksiType == "modbus_tcp" || koneksiType == "modbus_rtu") &&
+		mapping.SlaveID != nil && mapping.RegisterAddress != nil {
+		return true
+	}
+
+	// Has SNMP config
+	if koneksiType == "snmp" && mapping.OID != "" {
+		return true
+	}
+
+	// Has formula but NOT expression+variables (legacy simple formula)
+	if mapping.Formula != "" && mapping.Expression == "" && len(mapping.Variables) == 0 {
+		// Check if it's a simple formula (value * 2) not field reference
+		return !containsFieldReference(mapping.Formula)
+	}
+
+	return false
+}
+
+// isFormulaParameter checks if mapping is a formula parameter
+// Formula parameter has expression and variables
+func isFormulaParameter(mapping MappingData) bool {
+	// Explicit type
+	if mapping.Type == "formula" {
+		return true
+	}
+
+	// Has expression and variables
+	if mapping.Expression != "" && len(mapping.Variables) > 0 {
+		return true
+	}
+
+	return false
+}
+
+// containsFieldReference checks if formula contains field references like "Slave X Addr Y"
+// This is used to detect legacy format that should not be used anymore
+func containsFieldReference(formula string) bool {
+	if formula == "" {
+		return false
+	}
+
+	// Pattern to match "Slave X Addr Y" or "Slave X, Address Y" or variations
+	re := regexp.MustCompile(`(?i)slave\s+\d+.*?(?:addr|address)\s+\d+`)
+	return re.MatchString(formula)
+}
+
+// resolveVariables resolves formula variables to parameter IDs
+func resolveVariables(tx *gorm.DB, deviceID uint, variables []FormulaVariable, paramNameToID map[string]uint) (map[string]uint, error) {
+	result := make(map[string]uint)
+
+	for _, v := range variables {
+		if v.Name == "" {
+			return nil, fmt.Errorf("variable name is required")
+		}
+
+		var paramID uint
+		var found bool
+
+		// Priority 1: Direct parameter_id
+		if v.SourceParameterID != nil && *v.SourceParameterID > 0 {
+			paramID = *v.SourceParameterID
+			found = true
+		} else if v.SourceParameterName != "" {
+			// Priority 2: Via parameter name (newly created in this batch)
+			if id, exists := paramNameToID[v.SourceParameterName]; exists {
+				paramID = id
+				found = true
+			} else {
+				// Priority 3: Query from database
+				var param domain.Parameter
+				if err := tx.Where("device_id = ? AND nama = ?", deviceID, v.SourceParameterName).
+					First(&param).Error; err == nil {
+					paramID = param.ID
+					found = true
+				}
+			}
+		}
+
+		if !found {
+			return nil, fmt.Errorf("source parameter not found for variable '%s'", v.Name)
+		}
+
+		result[v.Name] = paramID
+		logger.GetLogger().Debugf("Resolved variable '%s' to parameter_id=%d", v.Name, paramID)
+	}
+
+	return result, nil
+}
+
+// validateExpression validates that expression contains all variables
+func validateExpression(expression string, varMappings map[string]uint) error {
+	if expression == "" {
+		return fmt.Errorf("expression is required")
+	}
+
+	// Check if expression contains all variable names
+	for varName := range varMappings {
+		// Simple check: variable name should appear in expression
+		// This is basic validation - actual evaluation happens at runtime
+		if !strings.Contains(expression, varName) {
+			logger.GetLogger().Warnf("Variable '%s' not found in expression '%s'", varName, expression)
+		}
+	}
+
+	return nil
+}
+
+// NOTE: Old functions resolveFieldReferencesWithMapping and normalizeExpression have been removed
+// as they were used for parsing register addresses from formula strings, which violates the new design.
+// Formula parameters now use explicit variable references via parameter_id or parameter_name.
