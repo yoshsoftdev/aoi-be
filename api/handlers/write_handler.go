@@ -20,7 +20,7 @@ func NewWriteHandler(writeService *service.WriteService) *WriteHandler {
 
 type ExecuteWriteRequest struct {
 	ParameterID    uint     `json:"parameter_id" binding:"required"`
-	Mode           string   `json:"mode" binding:"required,oneof=preset manual"`
+	Mode           string   `json:"mode" binding:"required,oneof=preset manual test"`
 	PresetID       *uint    `json:"preset_id,omitempty"`
 	RegisterValues []uint16 `json:"register_values,omitempty"`
 }
@@ -48,6 +48,8 @@ func (h *WriteHandler) Execute(c *gin.Context) {
 	mode := "MANUAL"
 	if req.Mode == "preset" {
 		mode = "PRESET"
+	} else if req.Mode == "test" {
+		mode = "TEST"
 	}
 
 	// Build write request
@@ -64,6 +66,20 @@ func (h *WriteHandler) Execute(c *gin.Context) {
 		writeReq = service.WriteRequest{
 			Mode:     mode,
 			PresetID: req.PresetID,
+		}
+	} else if mode == "TEST" {
+		// TEST mode: use register_values if provided, otherwise use default test value
+		if len(req.RegisterValues) > 0 {
+			writeReq = service.WriteRequest{
+				Mode:           mode,
+				RegisterValues: req.RegisterValues,
+			}
+		} else {
+			// Default test value: single register with value 0
+			writeReq = service.WriteRequest{
+				Mode:           mode,
+				RegisterValues: []uint16{0},
+			}
 		}
 	} else {
 		// MANUAL mode: can use either register_values (raw) or value (scalar)
