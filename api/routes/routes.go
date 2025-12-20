@@ -1,6 +1,8 @@
 package routes
 
 import (
+	"fmt"
+
 	"aoi-backend/api/handlers"
 	"aoi-backend/api/middleware"
 	"aoi-backend/internal/core/cache"
@@ -33,6 +35,9 @@ func SetupRoutes(
 	{
 		// Devices
 		deviceHandler := handlers.NewDeviceHandler(deviceService)
+		if deviceHandler == nil {
+			panic("Failed to create DeviceHandler")
+		}
 		devices := v1.Group("/devices")
 		{
 			devices.GET("", deviceHandler.GetAll)
@@ -48,7 +53,26 @@ func SetupRoutes(
 		modbusHandler := handlers.NewModbusHandler(modbusRTURepo, modbusTCPRepo, schedulerManager)
 
 		// Parameters
-		paramHandler := handlers.NewParameterHandler(paramService, schedulerManager)
+		// Initialize WriteService (requires additional dependencies)
+		paramRepo := repository.NewParameterRepository()
+		presetRepo := repository.NewPresetRepository()
+		deviceRepo := repository.NewDeviceRepository()
+		formulaEngine := service.NewFormulaEngine(
+			repository.NewFormulaRepository(),
+			paramRepo,
+			cache,
+			wsHub,
+		)
+		writeService := service.NewWriteService(
+			paramRepo,
+			presetRepo,
+			modbusRTURepo,
+			modbusTCPRepo,
+			deviceRepo,
+			cache,
+			formulaEngine,
+		)
+		paramHandler := handlers.NewParameterHandler(paramService, writeService, schedulerManager)
 		params := v1.Group("/parameters")
 		{
 			params.GET("", paramHandler.GetAll)
@@ -56,6 +80,7 @@ func SetupRoutes(
 			params.POST("", paramHandler.Create)
 			params.PATCH("/:id", paramHandler.Update)
 			params.DELETE("/:id", paramHandler.Delete)
+			params.POST("/:id/write", paramHandler.Write)
 			params.POST("/test-connection", modbusHandler.TestConnection)
 		}
 		modbusRTU := v1.Group("/modbus/rtu")
@@ -106,7 +131,30 @@ func SetupRoutes(
 		{
 			mapping.POST("/save", mappingHandler.Save)
 		}
+
+		// Write
+		writeHandler := handlers.NewWriteHandler(writeService)
+		write := v1.Group("/write")
+		{
+			write.POST("/execute", writeHandler.Execute)
+		}
 	}
+
+	// 404 handler for debugging
+	router.NoRoute(func(c *gin.Context) {
+		c.JSON(404, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("Route not found: %s %s", c.Request.Method, c.Request.URL.Path),
+			"available_routes": []string{
+				"GET /api/v1/devices",
+				"GET /api/v1/devices/:id",
+				"GET /api/v1/devices/type",
+				"POST /api/v1/devices",
+				"PATCH /api/v1/devices/:id",
+				"DELETE /api/v1/devices/:id",
+			},
+		})
+	})
 
 	return router
 }

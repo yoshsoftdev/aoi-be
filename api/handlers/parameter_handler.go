@@ -16,12 +16,14 @@ import (
 
 type ParameterHandler struct {
 	service          service.ParameterService
+	writeService     *service.WriteService
 	schedulerManager *scheduler.SchedulerManager
 }
 
-func NewParameterHandler(service service.ParameterService, schedulerManager *scheduler.SchedulerManager) *ParameterHandler {
+func NewParameterHandler(service service.ParameterService, writeService *service.WriteService, schedulerManager *scheduler.SchedulerManager) *ParameterHandler {
 	return &ParameterHandler{
 		service:          service,
+		writeService:     writeService,
 		schedulerManager: schedulerManager,
 	}
 }
@@ -105,10 +107,13 @@ func (h *ParameterHandler) Create(c *gin.Context) {
 		return
 	}
 
-	// Reload scheduler to pick up new parameter
-	if h.schedulerManager != nil {
-		logger.GetLogger().Info("Reloading scheduler after parameter creation")
+	// Reload scheduler ONLY for READ parameters
+	// WRITE parameters are command/on-demand and should NOT be scheduled
+	if h.schedulerManager != nil && param.Direction == "READ" {
+		logger.GetLogger().Info("Reloading scheduler after READ parameter creation")
 		h.schedulerManager.Reload()
+	} else if param.Direction == "WRITE" {
+		logger.GetLogger().Info("WRITE parameter created - skipping scheduler reload (WRITE parameters are not scheduled)")
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
@@ -151,10 +156,13 @@ func (h *ParameterHandler) Update(c *gin.Context) {
 		return
 	}
 
-	// Reload scheduler to pick up updated parameter
-	if h.schedulerManager != nil {
-		logger.GetLogger().Info("Reloading scheduler after parameter update")
+	// Reload scheduler ONLY for READ parameters
+	// WRITE parameters are command/on-demand and should NOT be scheduled
+	if h.schedulerManager != nil && param.Direction == "READ" {
+		logger.GetLogger().Info("Reloading scheduler after READ parameter update")
 		h.schedulerManager.Reload()
+	} else if param.Direction == "WRITE" {
+		logger.GetLogger().Info("WRITE parameter updated - skipping scheduler reload (WRITE parameters are not scheduled)")
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -197,5 +205,59 @@ func (h *ParameterHandler) Delete(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Parameter deleted successfully",
+	})
+}
+
+// Write handles write operations for a parameter
+func (h *ParameterHandler) Write(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Invalid parameter ID",
+		})
+		return
+	}
+
+	var req service.WriteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("Invalid request: %v", err),
+		})
+		return
+	}
+
+	// Validate mode
+	if req.Mode != "TEST" && req.Mode != "MANUAL" && req.Mode != "PRESET" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Invalid mode. Must be TEST, MANUAL, or PRESET",
+		})
+		return
+	}
+
+	// Execute write
+	response, err := h.writeService.Write(c.Request.Context(), uint(id), req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	statusCode := http.StatusOK
+	if !response.Success {
+		statusCode = http.StatusBadRequest
+	}
+
+	c.JSON(statusCode, gin.H{
+		"success": response.Success,
+		"message": response.Message,
+		"data": gin.H{
+			"read_back_value": response.ReadBackValue,
+		},
+		"error": response.Error,
 	})
 }

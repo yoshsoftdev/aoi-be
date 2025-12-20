@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/goburrow/modbus"
 	"aoi-backend/internal/domain"
+
+	"github.com/goburrow/modbus"
 )
 
 type TCPClient struct {
@@ -37,7 +38,7 @@ func NewTCPClient(device *domain.Device, slaveID *int) (*TCPClient, error) {
 	address := fmt.Sprintf("%s:%d", *device.IPAddress, port)
 	handler := modbus.NewTCPClientHandler(address)
 	handler.SlaveId = byte(finalSlaveID)
-	
+
 	timeout := 5 * time.Second
 	if device.TimeoutMs > 0 {
 		timeout = time.Duration(device.TimeoutMs) * time.Millisecond
@@ -103,10 +104,33 @@ func (c *TCPClient) Write(ctx context.Context, functionCode int, address uint16,
 	return nil
 }
 
+// WriteMultipleRegisters writes multiple registers using function code 16
+func (c *TCPClient) WriteMultipleRegisters(ctx context.Context, address uint16, values []uint16) error {
+	if len(values) == 0 {
+		return fmt.Errorf("values array cannot be empty")
+	}
+	if len(values) > 123 {
+		return fmt.Errorf("maximum 123 registers can be written at once")
+	}
+
+	// Convert []uint16 to []byte (2 bytes per register)
+	bytes := make([]byte, len(values)*2)
+	for i, v := range values {
+		bytes[i*2] = byte(v >> 8)     // High byte
+		bytes[i*2+1] = byte(v & 0xFF) // Low byte
+	}
+
+	_, err := c.client.WriteMultipleRegisters(address, uint16(len(values)), bytes)
+	if err != nil {
+		return fmt.Errorf("failed to write multiple registers: %w", err)
+	}
+
+	return nil
+}
+
 func (c *TCPClient) Close() error {
 	if c.handler != nil {
 		return c.handler.Close()
 	}
 	return nil
 }
-

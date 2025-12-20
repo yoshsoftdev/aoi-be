@@ -186,3 +186,19 @@ func ConvertValueToBytes(value uint32, byteOrder string, quantity int) ([]byte, 
 	return result, nil
 }
 
+// ConvertBytesToRegisterArray converts Modbus register bytes to array of individual uint16 values
+// Useful for reading multiple registers as individual values (not converting to single value)
+// This function reads registers as Big Endian (standard Modbus)
+func ConvertBytesToRegisterArray(data []byte, quantity int) ([]uint16, error) {
+	if len(data) < quantity*2 {
+		return nil, fmt.Errorf("insufficient data: got %d bytes, need %d", len(data), quantity*2)
+	}
+
+	result := make([]uint16, quantity)
+	for i := 0; i < quantity; i++ {
+		offset := i * 2
+		result[i] = binary.BigEndian.Uint16(data[offset : offset+2])
+	}
+
+	return result, nil
+}

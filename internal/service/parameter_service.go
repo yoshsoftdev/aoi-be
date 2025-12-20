@@ -1,9 +1,9 @@
 package service
 
 import (
+	"aoi-backend/internal/core/errors"
 	"aoi-backend/internal/domain"
 	"aoi-backend/internal/repository"
-	"aoi-backend/internal/core/errors"
 )
 
 type ParameterService interface {
@@ -27,13 +27,13 @@ func NewParameterService(repo repository.ParameterRepository) ParameterService {
 func (s *parameterService) Create(param *domain.Parameter) error {
 	// Validate type
 	validTypes := map[string]bool{
-		"modbus_rtu":      true,
-		"modbus_tcp":      true,
-		"analog_input":    true,
-		"analog_output":   true,
-		"digital_input":   true,
-		"digital_output":  true,
-		"snmp":            true,
+		"modbus_rtu":     true,
+		"modbus_tcp":     true,
+		"analog_input":   true,
+		"analog_output":  true,
+		"digital_input":  true,
+		"digital_output": true,
+		"snmp":           true,
 	}
 
 	if !validTypes[param.Type] {
@@ -43,6 +43,21 @@ func (s *parameterService) Create(param *domain.Parameter) error {
 	// Validate device_id exists
 	if param.DeviceID == 0 {
 		return errors.NewValidationError("Device ID is required", "")
+	}
+
+	// Set direction based on read_write if direction is not explicitly set
+	// CRITICAL: direction determines if parameter is scheduled (READ) or command-based (WRITE)
+	if param.Direction == "" {
+		if param.ReadWrite {
+			param.Direction = "WRITE"
+		} else {
+			param.Direction = "READ"
+		}
+	}
+
+	// Validate direction
+	if param.Direction != "READ" && param.Direction != "WRITE" {
+		return errors.NewValidationError("Invalid direction. Must be 'READ' or 'WRITE'", param.Direction)
 	}
 
 	return s.repo.Create(param)
@@ -77,4 +92,3 @@ func (s *parameterService) Delete(id uint) error {
 	}
 	return s.repo.Delete(id)
 }
-

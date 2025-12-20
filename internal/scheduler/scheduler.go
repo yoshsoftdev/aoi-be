@@ -47,30 +47,54 @@ func (s *SchedulerManager) Stop() {
 }
 
 func (s *SchedulerManager) loadAndScheduleAll() {
-	// Load Modbus RTU with Parameter and Device
+	// CRITICAL: Only schedule READ parameters (direction='READ')
+	// WRITE parameters are command/on-demand and should NOT be scheduled
+
+	// Load Modbus RTU with Parameter and Device - ONLY READ parameters
 	var modbusRTUConfigs []domain.ModbusRTU
-	s.db.Preload("Parameter.Device").Find(&modbusRTUConfigs)
+	s.db.Preload("Parameter.Device").
+		Joins("JOIN parameters ON parameters.id = modbus_rtu.id_parameter").
+		Where("parameters.direction = ? OR (parameters.direction = '' AND parameters.read_write = 0)", "READ").
+		Find(&modbusRTUConfigs)
 	for _, config := range modbusRTUConfigs {
+		// Double-check: skip if direction is WRITE
+		if config.Parameter.Direction == "WRITE" {
+			continue
+		}
 		pollingMs := s.getPollingMs(config.PollingMs, &config.Parameter)
 		if pollingMs > 0 {
 			s.ScheduleModbusRTU(config.ID, pollingMs)
 		}
 	}
 
-	// Load Modbus TCP with Parameter and Device
+	// Load Modbus TCP with Parameter and Device - ONLY READ parameters
 	var modbusTCPConfigs []domain.ModbusTCP
-	s.db.Preload("Parameter.Device").Find(&modbusTCPConfigs)
+	s.db.Preload("Parameter.Device").
+		Joins("JOIN parameters ON parameters.id = modbus_tcp.id_parameter").
+		Where("parameters.direction = ? OR (parameters.direction = '' AND parameters.read_write = 0)", "READ").
+		Find(&modbusTCPConfigs)
 	for _, config := range modbusTCPConfigs {
+		// Double-check: skip if direction is WRITE
+		if config.Parameter.Direction == "WRITE" {
+			continue
+		}
 		pollingMs := s.getPollingMs(config.PollingMs, &config.Parameter)
 		if pollingMs > 0 {
 			s.ScheduleModbusTCP(config.ID, pollingMs)
 		}
 	}
 
-	// Load SNMP Config with Parameter and Device
+	// Load SNMP Config with Parameter and Device - ONLY READ parameters
 	var snmpConfigs []domain.SNMPConfig
-	s.db.Preload("Parameter.Device").Find(&snmpConfigs)
+	s.db.Preload("Parameter.Device").
+		Joins("JOIN parameters ON parameters.id = snmp_config.id_parameter").
+		Where("parameters.direction = ? OR (parameters.direction = '' AND parameters.read_write = 0)", "READ").
+		Find(&snmpConfigs)
 	for _, config := range snmpConfigs {
+		// Double-check: skip if direction is WRITE
+		if config.Parameter.Direction == "WRITE" {
+			continue
+		}
 		pollingMs := s.getPollingMs(&config.PollingMs, &config.Parameter)
 		if pollingMs > 0 {
 			s.ScheduleSNMP(config.ID, pollingMs)

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"aoi-backend/api/routes"
 	"aoi-backend/internal/core/cache"
@@ -19,6 +21,15 @@ import (
 )
 
 func main() {
+	// Parse command line flags
+	devMode := flag.Bool("dev", false, "Enable development mode (Mac-compatible USB TTY paths)")
+	flag.Parse()
+
+	// Set dev flag in environment for config to read
+	if *devMode {
+		os.Setenv("APP_DEV", "true")
+	}
+
 	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
@@ -119,8 +130,10 @@ func main() {
 		modbusTCPWorker,
 		snmpWorker,
 	)
-	schedulerManager.Start()
-	log.Info("Scheduler started")
+	// Polling disabled - comment out to enable
+	// schedulerManager.Start()
+	// log.Info("Scheduler started")
+	log.Info("Scheduler initialized (polling disabled)")
 
 	// Setup routes
 	router := routes.SetupRoutes(
@@ -133,6 +146,7 @@ func main() {
 		wsHub,
 		schedulerManager,
 	)
+	log.Info("Routes configured successfully")
 
 	// Start server
 	addr := fmt.Sprintf("%s:%s", cfg.Server.Host, cfg.Server.Port)
@@ -144,6 +158,10 @@ func main() {
 			log.Fatalf("Failed to start server: %v", err)
 		}
 	}()
+
+	// Give server a moment to start
+	time.Sleep(100 * time.Millisecond)
+	log.Info("Server is ready to accept connections")
 
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
@@ -171,6 +189,7 @@ func runMigrations() error {
 		&domain.DigitalOutput{},
 		&domain.ParameterFormula{},
 		&domain.ParameterFormulaVar{},
+		&domain.ParameterPreset{},
 	); err != nil {
 		return err
 	}

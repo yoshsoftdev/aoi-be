@@ -2,9 +2,11 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
+	"aoi-backend/internal/core/logger"
 	"aoi-backend/internal/domain"
 	"aoi-backend/internal/modbus"
 	"aoi-backend/internal/snmp"
@@ -25,6 +27,20 @@ type TestConnectionResponse struct {
 }
 
 func (h *ModbusHandler) TestConnection(c *gin.Context) {
+	log := logger.GetLogger()
+
+	// Add panic recovery
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("Panic in TestConnection: %v", r)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error":   "Internal server error",
+				"details": fmt.Sprintf("%v", r),
+			})
+		}
+	}()
+
 	var req TestConnectionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -41,6 +57,7 @@ func (h *ModbusHandler) TestConnection(c *gin.Context) {
 
 	switch req.Type {
 	case "modbus_rtu":
+		log.Debugf("TestConnection: modbus_rtu, quantity=%d", getInt(req.Config.(map[string]interface{}), "quantity"))
 		// Parse config to Device (for connection) and ModbusRTU (for register reading)
 		configMap := req.Config.(map[string]interface{})
 		device := &domain.Device{
@@ -57,6 +74,12 @@ func (h *ModbusHandler) TestConnection(c *gin.Context) {
 			RegisterAddress: getInt(configMap, "register_address"),
 			Quantity:        getInt(configMap, "quantity"),
 			ByteOrder:       getString(configMap, "byte_order"),
+			DataType:        getString(configMap, "data_type"), // Data type (uint16, int32, float32, float64)
+		}
+
+		// Set default data_type if not provided
+		if config.DataType == "" {
+			config.DataType = "uint16"
 		}
 
 		// Use slave_id from parameter config if provided, otherwise from device
@@ -81,8 +104,10 @@ func (h *ModbusHandler) TestConnection(c *gin.Context) {
 		// Coba baca sekali untuk sanity check.
 		// Kalau baca gagal, tetap dianggap koneksi berhasil selama client bisa dibuat
 		// (mirip modpoll yang fokus cek koneksi fisik).
+		log.Debugf("TestConnection: Reading FC=%d, addr=%d, qty=%d", config.FunctionCode, config.RegisterAddress, config.Quantity)
 		data, err := client.Read(ctx, config.FunctionCode, uint16(config.RegisterAddress), uint16(config.Quantity))
 		if err != nil {
+			log.Warnf("TestConnection: Read failed: %v", err)
 			response = TestConnectionResponse{
 				Connected: true,
 				Message:   "Connection OK, read failed",
@@ -90,18 +115,20 @@ func (h *ModbusHandler) TestConnection(c *gin.Context) {
 			}
 			break
 		}
+		log.Debugf("TestConnection: Read succeeded, got %d bytes", len(data))
 
 		// Convert bytes to value berdasarkan data_type.
 		// Kalau konversi gagal, tetap Connected=true tapi dengan detail error.
-		var rawValueFloat float64
 		dataType := config.DataType
 		if dataType == "" {
 			dataType = "uint16"
 		}
 
-		switch dataType {
-		case "float32", "float": // Support both "float32" and "float" (alias)
-			rawFloat32, err := modbus.ConvertBytesToFloat32(data, config.ByteOrder, config.Quantity)
+		var rawValue interface{}
+
+		// For uint16 with quantity > 1, return array of individual register values
+		if dataType == "uint16" && config.Quantity > 1 {
+			registerArray, err := modbus.ConvertBytesToRegisterArray(data, config.Quantity)
 			if err != nil {
 				response = TestConnectionResponse{
 					Connected: true,
@@ -110,45 +137,60 @@ func (h *ModbusHandler) TestConnection(c *gin.Context) {
 				}
 				break
 			}
-			rawValueFloat = float64(rawFloat32)
-		case "float64":
-			rawFloat64, err := modbus.ConvertBytesToFloat64(data, config.ByteOrder, config.Quantity)
-			if err != nil {
+			// Convert []uint16 to []float64 for JSON response
+			rawValueArray := make([]float64, len(registerArray))
+			for i, v := range registerArray {
+				rawValueArray[i] = float64(v)
+			}
+			rawValue = rawValueArray
+		} else {
+			// For other data types or single uint16, convert to single value
+			var rawValueFloat float64
+			var conversionErr error
+			switch dataType {
+			case "float32", "float": // Support both "float32" and "float" (alias)
+				rawFloat32, err := modbus.ConvertBytesToFloat32(data, config.ByteOrder, config.Quantity)
+				if err != nil {
+					conversionErr = err
+				} else {
+					rawValueFloat = float64(rawFloat32)
+				}
+			case "float64":
+				rawFloat64, err := modbus.ConvertBytesToFloat64(data, config.ByteOrder, config.Quantity)
+				if err != nil {
+					conversionErr = err
+				} else {
+					rawValueFloat = rawFloat64
+				}
+			case "int32":
+				rawInt32, err := modbus.ConvertBytesToSignedInt32(data, config.ByteOrder, config.Quantity)
+				if err != nil {
+					conversionErr = err
+				} else {
+					rawValueFloat = float64(rawInt32)
+				}
+			default: // uint16 (single), uint32, or default
+				rawValueUint, err := modbus.ConvertBytesToValue(data, config.ByteOrder, config.Quantity)
+				if err != nil {
+					conversionErr = err
+				} else {
+					rawValueFloat = float64(rawValueUint)
+				}
+			}
+			if conversionErr != nil {
 				response = TestConnectionResponse{
 					Connected: true,
 					Message:   "Connection OK, conversion failed",
-					Details:   err.Error(),
+					Details:   conversionErr.Error(),
 				}
 				break
 			}
-			rawValueFloat = rawFloat64
-		case "int32":
-			rawInt32, err := modbus.ConvertBytesToSignedInt32(data, config.ByteOrder, config.Quantity)
-			if err != nil {
-				response = TestConnectionResponse{
-					Connected: true,
-					Message:   "Connection OK, conversion failed",
-					Details:   err.Error(),
-				}
-				break
-			}
-			rawValueFloat = float64(rawInt32)
-		default: // uint16, uint32, or default
-			rawValue, err := modbus.ConvertBytesToValue(data, config.ByteOrder, config.Quantity)
-			if err != nil {
-				response = TestConnectionResponse{
-					Connected: true,
-					Message:   "Connection OK, conversion failed",
-					Details:   err.Error(),
-				}
-				break
-			}
-			rawValueFloat = float64(rawValue)
+			rawValue = rawValueFloat
 		}
 
 		response = TestConnectionResponse{
 			Connected: true,
-			RawValue:  rawValueFloat,
+			RawValue:  rawValue,
 			Message:   "Connection successful",
 		}
 
@@ -204,15 +246,16 @@ func (h *ModbusHandler) TestConnection(c *gin.Context) {
 		}
 
 		// Convert bytes ke value; kalau gagal tetap Connected=true.
-		var rawValueFloat float64
 		dataType := config.DataType
 		if dataType == "" {
 			dataType = "uint16"
 		}
 
-		switch dataType {
-		case "float32", "float": // Support both "float32" and "float" (alias)
-			rawFloat32, err := modbus.ConvertBytesToFloat32(data, config.ByteOrder, config.Quantity)
+		var rawValue interface{}
+
+		// For uint16 with quantity > 1, return array of individual register values
+		if dataType == "uint16" && config.Quantity > 1 {
+			registerArray, err := modbus.ConvertBytesToRegisterArray(data, config.Quantity)
 			if err != nil {
 				response = TestConnectionResponse{
 					Connected: true,
@@ -221,45 +264,60 @@ func (h *ModbusHandler) TestConnection(c *gin.Context) {
 				}
 				break
 			}
-			rawValueFloat = float64(rawFloat32)
-		case "float64":
-			rawFloat64, err := modbus.ConvertBytesToFloat64(data, config.ByteOrder, config.Quantity)
-			if err != nil {
+			// Convert []uint16 to []float64 for JSON response
+			rawValueArray := make([]float64, len(registerArray))
+			for i, v := range registerArray {
+				rawValueArray[i] = float64(v)
+			}
+			rawValue = rawValueArray
+		} else {
+			// For other data types or single uint16, convert to single value
+			var rawValueFloat float64
+			var conversionErr error
+			switch dataType {
+			case "float32", "float": // Support both "float32" and "float" (alias)
+				rawFloat32, err := modbus.ConvertBytesToFloat32(data, config.ByteOrder, config.Quantity)
+				if err != nil {
+					conversionErr = err
+				} else {
+					rawValueFloat = float64(rawFloat32)
+				}
+			case "float64":
+				rawFloat64, err := modbus.ConvertBytesToFloat64(data, config.ByteOrder, config.Quantity)
+				if err != nil {
+					conversionErr = err
+				} else {
+					rawValueFloat = rawFloat64
+				}
+			case "int32":
+				rawInt32, err := modbus.ConvertBytesToSignedInt32(data, config.ByteOrder, config.Quantity)
+				if err != nil {
+					conversionErr = err
+				} else {
+					rawValueFloat = float64(rawInt32)
+				}
+			default: // uint16 (single), uint32, or default
+				rawValueUint, err := modbus.ConvertBytesToValue(data, config.ByteOrder, config.Quantity)
+				if err != nil {
+					conversionErr = err
+				} else {
+					rawValueFloat = float64(rawValueUint)
+				}
+			}
+			if conversionErr != nil {
 				response = TestConnectionResponse{
 					Connected: true,
 					Message:   "Connection OK, conversion failed",
-					Details:   err.Error(),
+					Details:   conversionErr.Error(),
 				}
 				break
 			}
-			rawValueFloat = rawFloat64
-		case "int32":
-			rawInt32, err := modbus.ConvertBytesToSignedInt32(data, config.ByteOrder, config.Quantity)
-			if err != nil {
-				response = TestConnectionResponse{
-					Connected: true,
-					Message:   "Connection OK, conversion failed",
-					Details:   err.Error(),
-				}
-				break
-			}
-			rawValueFloat = float64(rawInt32)
-		default: // uint16, uint32, or default
-			rawValue, err := modbus.ConvertBytesToValue(data, config.ByteOrder, config.Quantity)
-			if err != nil {
-				response = TestConnectionResponse{
-					Connected: true,
-					Message:   "Connection OK, conversion failed",
-					Details:   err.Error(),
-				}
-				break
-			}
-			rawValueFloat = float64(rawValue)
+			rawValue = rawValueFloat
 		}
 
 		response = TestConnectionResponse{
 			Connected: true,
-			RawValue:  rawValueFloat,
+			RawValue:  rawValue,
 			Message:   "Connection successful",
 		}
 

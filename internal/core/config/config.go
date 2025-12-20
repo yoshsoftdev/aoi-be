@@ -40,6 +40,7 @@ type LogConfig struct {
 type AppConfig struct {
 	Name string
 	Env  string
+	Dev  bool // Development mode flag
 }
 
 var AppConfigInstance *Config
@@ -96,6 +97,7 @@ func Load() (*Config, error) {
 		App: AppConfig{
 			Name: viper.GetString("APP_NAME"),
 			Env:  viper.GetString("APP_ENV"),
+			Dev:  viper.GetBool("APP_DEV"), // Read from --dev flag or APP_DEV env var
 		},
 	}
 
@@ -114,4 +116,3 @@ func Get() *Config {
 	}
 	return AppConfigInstance
 }
-
