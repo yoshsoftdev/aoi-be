@@ -23,6 +23,8 @@ func SetupRoutes(
 	cache cache.Cache,
 	wsHub *worker.WebSocketHub,
 	schedulerManager *scheduler.SchedulerManager,
+	workflowRepo repository.WorkflowRepository,
+	workflowEngine *service.WorkflowEngine,
 ) *gin.Engine {
 	router := gin.Default()
 
@@ -137,6 +139,17 @@ func SetupRoutes(
 		write := v1.Group("/write")
 		{
 			write.POST("/execute", writeHandler.Execute)
+		}
+
+		// Workflow
+		workflowHandler := handlers.NewWorkflowHandler(workflowRepo, workflowEngine)
+		workflow := v1.Group("/workflows")
+		{
+			workflow.GET("", workflowHandler.GetAll)
+			workflow.GET("/:id", workflowHandler.GetByID)
+			workflow.POST("", workflowHandler.Create)
+			workflow.PATCH("/:id", workflowHandler.Update)
+			workflow.DELETE("/:id", workflowHandler.Delete)
 		}
 	}
 

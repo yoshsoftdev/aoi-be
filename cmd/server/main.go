@@ -67,6 +67,8 @@ func main() {
 	modbusTCPRepo := repository.NewModbusTCPRepository()
 	snmpRepo := repository.NewSNMPRepository()
 	formulaRepo := repository.NewFormulaRepository()
+	presetRepo := repository.NewPresetRepository()
+	workflowRepo := repository.NewWorkflowRepository(database.GetDB())
 
 	// Initialize services
 	deviceService := service.NewDeviceService(deviceRepo)
@@ -92,6 +94,38 @@ func main() {
 	} else {
 		log.Info("Formula engine initialized and loaded")
 	}
+
+	// Initialize Write Service (needed for Workflow Engine)
+	writeService := service.NewWriteService(
+		paramRepo,
+		presetRepo,
+		modbusRTURepo,
+		modbusTCPRepo,
+		deviceRepo,
+		cacheInstance,
+		formulaEngine,
+	)
+
+	// Initialize Workflow Engine
+	workflowEngine := service.NewWorkflowEngine(
+		workflowRepo,
+		paramRepo,
+		cacheInstance,
+		writeService,
+	)
+
+	// Load all workflows from database
+	if err := workflowEngine.LoadAll(); err != nil {
+		log.Warnf("Failed to load workflows: %v", err)
+	} else {
+		log.Info("Workflow engine initialized and loaded")
+	}
+
+	// Set callback: Formula Engine -> Workflow Engine
+	// Workflow Engine evaluates AFTER data READ bersih (after formula evaluation)
+	formulaEngine.SetWorkflowCallback(func(parameterID uint, data *domain.RealtimeData) {
+		workflowEngine.OnParameterUpdated(parameterID, data)
+	})
 
 	// Initialize workers (pass formulaEngine for reactive formula evaluation)
 	modbusRTUWorker := worker.NewModbusRTUWorker(
@@ -130,10 +164,9 @@ func main() {
 		modbusTCPWorker,
 		snmpWorker,
 	)
-	// Polling disabled - comment out to enable
-	// schedulerManager.Start()
-	// log.Info("Scheduler started")
-	log.Info("Scheduler initialized (polling disabled)")
+	// Start scheduler (polling enabled)
+	schedulerManager.Start()
+	log.Info("Scheduler started (polling enabled)")
 
 	// Setup routes
 	router := routes.SetupRoutes(
@@ -145,6 +178,8 @@ func main() {
 		cacheInstance,
 		wsHub,
 		schedulerManager,
+		workflowRepo,
+		workflowEngine,
 	)
 	log.Info("Routes configured successfully")
 
@@ -190,6 +225,10 @@ func runMigrations() error {
 		&domain.ParameterFormula{},
 		&domain.ParameterFormulaVar{},
 		&domain.ParameterPreset{},
+		&domain.Workflow{},
+		&domain.WorkflowCondition{},
+		&domain.WorkflowAction{},
+		&domain.WorkflowState{},
 	); err != nil {
 		return err
 	}

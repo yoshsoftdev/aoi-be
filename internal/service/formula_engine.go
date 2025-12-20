@@ -31,13 +31,17 @@ type FormulaVar struct {
 	SourceParameterID uint
 }
 
+// WorkflowCallback is called after formula evaluation to trigger workflow engine
+type WorkflowCallback func(parameterID uint, data *domain.RealtimeData)
+
 // FormulaEngine manages reactive formula evaluation
 type FormulaEngine struct {
-	formulaRepo   repository.FormulaRepository
-	paramRepo     repository.ParameterRepository
-	cache         cache.Cache
-	wsBroadcaster WebSocketBroadcaster
-	evaluator     *FormulaEvaluator
+	formulaRepo      repository.FormulaRepository
+	paramRepo        repository.ParameterRepository
+	cache            cache.Cache
+	wsBroadcaster    WebSocketBroadcaster
+	evaluator        *FormulaEvaluator
+	workflowCallback WorkflowCallback // Callback to notify workflow engine
 
 	// In-memory registry
 	mu              sync.RWMutex
@@ -54,15 +58,21 @@ func NewFormulaEngine(
 	wsBroadcaster WebSocketBroadcaster,
 ) *FormulaEngine {
 	return &FormulaEngine{
-		formulaRepo:     formulaRepo,
-		paramRepo:       paramRepo,
-		cache:           cache,
-		wsBroadcaster:   wsBroadcaster,
-		evaluator:       NewFormulaEvaluator(),
-		formulasByParam: make(map[uint]*FormulaDefinition),
-		dependants:      make(map[uint][]uint),
-		maxDepth:        10, // Maximum depth for dependency chain
+		formulaRepo:      formulaRepo,
+		paramRepo:        paramRepo,
+		cache:            cache,
+		wsBroadcaster:    wsBroadcaster,
+		evaluator:        NewFormulaEvaluator(),
+		workflowCallback: nil, // Set via SetWorkflowCallback
+		formulasByParam:  make(map[uint]*FormulaDefinition),
+		dependants:       make(map[uint][]uint),
+		maxDepth:         10, // Maximum depth for dependency chain
 	}
+}
+
+// SetWorkflowCallback sets the callback to notify workflow engine after formula evaluation
+func (e *FormulaEngine) SetWorkflowCallback(callback WorkflowCallback) {
+	e.workflowCallback = callback
 }
 
 // LoadAll loads all formulas from database and builds the registry
@@ -131,7 +141,12 @@ func (e *FormulaEngine) OnRawParameterUpdated(sourceParamID uint, data *domain.R
 	e.mu.RUnlock()
 
 	if len(dependantFormulaParamIDs) == 0 {
-		return // No formulas depend on this parameter
+		// No formulas depend on this parameter, but workflow might monitor it
+		// Notify workflow engine about raw parameter update
+		if e.workflowCallback != nil {
+			e.workflowCallback(sourceParamID, data)
+		}
+		return
 	}
 
 	// Evaluate all dependent formulas
@@ -263,6 +278,13 @@ func (e *FormulaEngine) evaluateFormula(formulaParamID uint, depth int) error {
 		if err := e.evaluateFormula(nextFormulaParamID, depth+1); err != nil {
 			logger.GetLogger().Warnf("Failed to evaluate dependent formula %d: %v", nextFormulaParamID, err)
 		}
+	}
+
+	// NOTIFY Workflow Engine (after formula evaluation)
+	// Workflow Engine will evaluate workflows that monitor this parameter
+	// This is called via callback to avoid circular dependency
+	if e.workflowCallback != nil {
+		e.workflowCallback(formulaParamID, &formulaData)
 	}
 
 	return nil
