@@ -94,6 +94,14 @@ func main() {
 		log.Warnf("Failed to load formulas: %v", err)
 	} else {
 		log.Info("Formula engine initialized and loaded")
+		// Evaluate all formulas after loading (if dependencies are available)
+		// This ensures existing formula parameters appear in dashboard immediately
+		go func() {
+			// Wait a bit for raw parameters to be polled and cached
+			time.Sleep(2 * time.Second)
+			log.Info("Evaluating all loaded formulas...")
+			formulaEngine.EvaluateAll()
+		}()
 	}
 
 	// Initialize Write Service (needed for Workflow Engine)

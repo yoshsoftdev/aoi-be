@@ -132,12 +132,18 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) error {
 	cacheKey := fmt.Sprintf("parameter:raw:%d", config.IDParameter)
 	if err := w.cache.Set(cacheKey, realtimeData, 24*time.Hour); err != nil {
 		logger.GetLogger().Warnf("Failed to save raw data to cache: %v", err)
+	} else {
+		logger.GetLogger().Infof("[READ] Raw parameter cached: parameter_id=%d, parameter_nama=%s, raw_value=%v, processed_value=%v, cache_key=%s",
+			config.IDParameter, param.Nama, realtimeData.RawValue, realtimeData.ProcessedValue, cacheKey)
 	}
 
 	// NOTIFY Formula Engine (do not broadcast)
 	// Formula Engine will evaluate formulas and broadcast clean data
 	if w.formulaEngine != nil {
+		logger.GetLogger().Debugf("[READ] Notifying Formula Engine: parameter_id=%d", config.IDParameter)
 		w.formulaEngine.OnRawParameterUpdated(config.IDParameter, &realtimeData)
+	} else {
+		logger.GetLogger().Warnf("[READ] Formula Engine is nil, cannot notify: parameter_id=%d", config.IDParameter)
 	}
 
 	return nil

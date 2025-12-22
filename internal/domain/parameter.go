@@ -9,6 +9,8 @@ type Parameter struct {
 	Type        string    `gorm:"not null" json:"type"`                                   // modbus_rtu, modbus_tcp, analog_input, analog_output, snmp, digital_input, digital_output, formula
 	Direction   string    `gorm:"type:varchar(10);default:'READ';index" json:"direction"` // READ (polling/scheduler) or WRITE (command/on-demand)
 	ReadWrite   bool      `gorm:"default:false" json:"read_write"`                        // Deprecated: use Direction instead
+	WriteMode   *string   `gorm:"type:varchar(10);index" json:"write_mode,omitempty"`     // PRESET (value stored) or DYNAMIC (value provided at write time) - only for WRITE parameters
+	PresetValue *string   `gorm:"type:text" json:"preset_value,omitempty"`                // JSON-encoded preset value - only for PRESET mode
 	Unit        *string   `gorm:"type:varchar(20)" json:"unit,omitempty"`
 	CustomRumus *string   `gorm:"type:text" json:"custom_rumus,omitempty"`
 	IsFormula   bool      `gorm:"default:false;index" json:"is_formula"` // true = derived parameter (formula), false = raw parameter

@@ -134,14 +134,43 @@ func (e *FormulaEngine) LoadAll() error {
 	return nil
 }
 
+// EvaluateAll evaluates all loaded formulas if their dependencies are available in cache
+// This is useful after LoadAll() to populate dashboard with existing formula results
+func (e *FormulaEngine) EvaluateAll() {
+	e.mu.RLock()
+	formulaParamIDs := make([]uint, 0, len(e.formulasByParam))
+	for paramID := range e.formulasByParam {
+		formulaParamIDs = append(formulaParamIDs, paramID)
+	}
+	e.mu.RUnlock()
+
+	log := logger.GetLogger()
+	log.Infof("Evaluating %d formulas after LoadAll", len(formulaParamIDs))
+
+	successCount := 0
+	for _, paramID := range formulaParamIDs {
+		if err := e.evaluateFormula(paramID, 0); err != nil {
+			log.Debugf("Could not evaluate formula parameter %d (dependencies may not be ready yet): %v", paramID, err)
+		} else {
+			successCount++
+		}
+	}
+
+	log.Infof("Successfully evaluated %d/%d formulas", successCount, len(formulaParamIDs))
+}
+
 // OnRawParameterUpdated is called by workers after a raw parameter is updated in cache
 // This triggers reactive evaluation of all formulas that depend on this parameter
 func (e *FormulaEngine) OnRawParameterUpdated(sourceParamID uint, data *domain.RealtimeData) {
+	log := logger.GetLogger()
+	log.Infof("[FORMULA] OnRawParameterUpdated: source_param_id=%d, value=%v", sourceParamID, data.ProcessedValue)
+
 	e.mu.RLock()
 	dependantFormulaParamIDs := e.dependants[sourceParamID]
 	e.mu.RUnlock()
 
 	if len(dependantFormulaParamIDs) == 0 {
+		log.Debugf("[FORMULA] No formulas depend on parameter %d", sourceParamID)
 		// No formulas depend on this parameter, but workflow might monitor it
 		// Notify workflow engine about raw parameter update
 		if e.workflowCallback != nil {
@@ -150,10 +179,12 @@ func (e *FormulaEngine) OnRawParameterUpdated(sourceParamID uint, data *domain.R
 		return
 	}
 
+	log.Infof("[FORMULA] Found %d formulas depending on parameter %d: %v", len(dependantFormulaParamIDs), sourceParamID, dependantFormulaParamIDs)
 	// Evaluate all dependent formulas
 	for _, formulaParamID := range dependantFormulaParamIDs {
+		log.Debugf("[FORMULA] Evaluating formula parameter %d triggered by source %d", formulaParamID, sourceParamID)
 		if err := e.evaluateFormula(formulaParamID, 0); err != nil {
-			logger.GetLogger().Warnf("Failed to evaluate formula parameter %d: %v", formulaParamID, err)
+			logger.GetLogger().Warnf("[FORMULA] Failed to evaluate formula parameter %d: %v", formulaParamID, err)
 		}
 	}
 }
@@ -293,7 +324,11 @@ func (e *FormulaEngine) evaluateFormula(formulaParamID uint, depth int) error {
 	// Broadcast CLEAN DATA via WebSocket
 	// Only formula parameters are broadcast - raw parameters are internal only
 	if e.wsBroadcaster != nil {
+		logger.GetLogger().Infof("[FORMULA] Broadcasting clean data: parameter_id=%d, parameter_nama=%s, expression=%s, result=%v, device_nama=%s",
+			formulaParamID, param.Nama, def.Expression, resultFloat, deviceNama)
 		e.wsBroadcaster.BroadcastDataUpdate(formulaData)
+	} else {
+		logger.GetLogger().Warnf("[FORMULA] WebSocket broadcaster is nil, cannot broadcast: parameter_id=%d", formulaParamID)
 	}
 
 	// Recursively evaluate formulas that depend on this formula
@@ -315,6 +350,12 @@ func (e *FormulaEngine) evaluateFormula(formulaParamID uint, depth int) error {
 	}
 
 	return nil
+}
+
+// EvaluateFormula is a public method to evaluate a formula parameter
+// This is useful for triggering evaluation after formula creation or update
+func (e *FormulaEngine) EvaluateFormula(formulaParamID uint) error {
+	return e.evaluateFormula(formulaParamID, 0)
 }
 
 // toFloat64 converts various numeric types to float64

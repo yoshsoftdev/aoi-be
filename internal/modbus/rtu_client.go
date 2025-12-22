@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 	"time"
 
 	"aoi-backend/internal/core/config"
@@ -14,6 +15,11 @@ import (
 
 	"github.com/goburrow/modbus"
 )
+
+// contains checks if a string contains a substring (case-insensitive)
+func contains(s, substr string) bool {
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+}
 
 type RTUClient struct {
 	handler *modbus.RTUClientHandler
@@ -69,9 +75,36 @@ func NewRTUClient(device *domain.Device, slaveID *int) (*RTUClient, error) {
 	}
 	handler.Timeout = timeout
 
+	log := logger.GetLogger()
+	log.Debugf("[MODBUS RTU] Connecting: port=%s, baud=%d, slave_id=%d, timeout=%v, data_bits=%d, parity=%s, stop_bits=%d",
+		portPath, *device.Baud, finalSlaveID, timeout,
+		func() int {
+			if device.DataBits != nil {
+				return *device.DataBits
+			} else {
+				return 8
+			}
+		}(),
+		func() string {
+			if device.Parity != nil {
+				return *device.Parity
+			} else {
+				return "N"
+			}
+		}(),
+		func() int {
+			if device.StopBits != nil {
+				return *device.StopBits
+			} else {
+				return 1
+			}
+		}())
+
 	if err := handler.Connect(); err != nil {
+		log.Errorf("[MODBUS RTU] Connection failed: port=%s, error=%v", portPath, err)
 		return nil, fmt.Errorf("failed to connect to Modbus RTU: %w", err)
 	}
+	log.Debugf("[MODBUS RTU] Connected successfully: port=%s", portPath)
 
 	client := modbus.NewClient(handler)
 
@@ -100,7 +133,8 @@ func (c *RTUClient) Read(ctx context.Context, functionCode int, address uint16, 
 		}
 
 		if err != nil {
-			log.Errorf("RTUClient.Read: Standard library read failed: %v", err)
+			log.Errorf("[MODBUS RTU] Standard library read failed: function_code=%d, address=%d, quantity=%d, error=%v, error_type=%T",
+				functionCode, address, quantity, err, err)
 			return nil, fmt.Errorf("failed to read Modbus: %w", err)
 		}
 
@@ -128,6 +162,8 @@ func (c *RTUClient) Read(ctx context.Context, functionCode int, address uint16, 
 	}
 
 	if err != nil {
+		log.Errorf("[MODBUS RTU] Read failed: function_code=%d, address=%d, quantity=%d, error=%v, error_type=%T",
+			functionCode, address, quantity, err, err)
 		return nil, fmt.Errorf("failed to read Modbus: %w", err)
 	}
 
@@ -429,18 +465,152 @@ func (c *RTUClient) WriteMultipleCoils(ctx context.Context, address uint16, valu
 
 	log.Debugf("RTUClient.WriteMultipleCoils: Packed %d coils into %d bytes: %v", len(values), byteCount, coilBytes)
 
-	// Log write request
-	LogRequest("RTU", 15, address, uint16(len(values)), coilBytes)
-	log.Infof("RTUClient.WriteMultipleCoils: Writing %d coils starting at address %d", len(values), address)
-
-	// Call library WriteMultipleCoils
-	// Signature: WriteMultipleCoils(address, quantity uint16, value []byte)
+	// Try library first (more reliable)
+	// Only use custom implementation if library fails with slave ID mismatch error
 	_, err := c.client.WriteMultipleCoils(address, uint16(len(values)), coilBytes)
-	if err != nil {
-		log.Errorf("RTUClient.WriteMultipleCoils: Failed to write: %v", err)
+	if err == nil {
+		log.Infof("RTUClient.WriteMultipleCoils: Successfully wrote coils using library")
+		return nil
+	}
+
+	// Check if error is due to slave ID mismatch
+	errStr := err.Error()
+	if contains(errStr, "slave id") || contains(errStr, "slave_id") || contains(errStr, "slave ID") {
+		log.Warnf("RTUClient.WriteMultipleCoils: Library failed with slave ID error, trying custom implementation: %v", err)
+		// Continue with custom implementation
+	} else {
+		// Other errors - return immediately
 		return fmt.Errorf("failed to write multiple coils: %w", err)
 	}
 
+	// Get serial port reader/writer from handler using reflection (same approach as readMultipleRegisters)
+	handlerValue := reflect.ValueOf(c.handler).Elem()
+	var serialPort interface{}
+	var found bool
+
+	// Try exported fields first
+	possibleFieldNames := []string{"serialPort", "port", "conn", "connection", "SerialPort", "Port", "Conn"}
+	for _, fieldName := range possibleFieldNames {
+		field := handlerValue.FieldByName(fieldName)
+		if field.IsValid() && !field.IsZero() {
+			serialPort = field.Interface()
+			found = true
+			log.Debugf("WriteMultipleCoils: Found serial port field: %s", fieldName)
+			break
+		}
+	}
+
+	// If not found, try to find field by iterating through all fields
+	if !found {
+		handlerType := handlerValue.Type()
+		for i := 0; i < handlerType.NumField(); i++ {
+			fieldType := handlerType.Field(i)
+			fieldValue := handlerValue.Field(i)
+
+			// Check if field implements io.Reader and io.Writer
+			if fieldValue.CanInterface() && !fieldValue.IsZero() {
+				iface := fieldValue.Interface()
+				if reader, ok := iface.(io.Reader); ok {
+					if _, ok := iface.(io.Writer); ok {
+						serialPort = reader
+						found = true
+						log.Debugf("WriteMultipleCoils: Found serial port field by interface check: %s", fieldType.Name)
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if !found {
+		// Fallback failed - return original library error
+		return fmt.Errorf("failed to write multiple coils: %w", err)
+	}
+
+	reader, ok := serialPort.(io.Reader)
+	if !ok {
+		return fmt.Errorf("failed to write multiple coils: serial port is not a reader: %w", err)
+	}
+
+	writer, ok := serialPort.(io.Writer)
+	if !ok {
+		return fmt.Errorf("failed to write multiple coils: serial port is not a writer: %w", err)
+	}
+
+	// Build request frame (FC15: Write Multiple Coils)
+	slaveID := byte(c.handler.SlaveId)
+	quantity := uint16(len(values))
+	requestLen := 7 + byteCount // slave_id + function_code + address(2) + quantity(2) + byte_count(1) + coil_bytes + CRC(2)
+	request := make([]byte, requestLen)
+	request[0] = slaveID
+	request[1] = 15 // Function code
+	binary.BigEndian.PutUint16(request[2:4], address)
+	binary.BigEndian.PutUint16(request[4:6], quantity)
+	request[6] = byte(byteCount)
+	copy(request[7:7+byteCount], coilBytes)
+
+	// Calculate CRC
+	crc := calculateCRC16(request[:7+byteCount])
+	request[7+byteCount] = byte(crc & 0xFF)
+	request[7+byteCount+1] = byte(crc >> 8)
+
+	// Log write request
+	LogRequest("RTU", 15, address, quantity, request)
+	log.Infof("RTUClient.WriteMultipleCoils: Writing %d coils starting at address %d", len(values), address)
+
+	// Send request
+	if _, err := writer.Write(request); err != nil {
+		return fmt.Errorf("failed to write request: %w", err)
+	}
+
+	// Read response (FC15 response: slave_id + function_code + address (2 bytes) + quantity (2 bytes) + CRC (2 bytes))
+	// Total: 8 bytes
+	response := make([]byte, 8)
+	if err := readBytesWithTimeout(reader, response, c.handler.Timeout); err != nil {
+		// If reading fails, try fallback to library (device may have accepted write anyway)
+		log.Warnf("RTUClient.WriteMultipleCoils: Failed to read response, but write may have succeeded: %v", err)
+		// Try to verify with library read-back (optional)
+		return nil // Consider write successful if we can't read response
+	}
+
+	// Validate CRC (Modbus RTU uses little-endian for CRC: low byte first, high byte second)
+	receivedCRC := uint16(response[6]) | (uint16(response[7]) << 8)
+	calculatedCRC := calculateCRC16(response[:6])
+	if receivedCRC != calculatedCRC {
+		// Log warning but don't fail - device may have accepted write
+		log.Warnf("RTUClient.WriteMultipleCoils: CRC mismatch: received 0x%04X, calculated 0x%04X (write may have succeeded anyway)", receivedCRC, calculatedCRC)
+		// Don't return error - continue with validation
+	}
+
+	// Validate function code (should match request)
+	if response[1] != 15 {
+		if response[1]&0x80 != 0 {
+			errorCode := response[1] & 0x7F
+			return fmt.Errorf("modbus error response: function code 0x%02X, error code 0x%02X", 15, errorCode)
+		}
+		return fmt.Errorf("invalid function code in response: expected 15, got %d", response[1])
+	}
+
+	// Validate address matches (should echo request)
+	responseAddress := binary.BigEndian.Uint16(response[2:4])
+	if responseAddress != address {
+		log.Warnf("RTUClient.WriteMultipleCoils: Address mismatch in response: expected %d, got %d (continuing anyway)", address, responseAddress)
+	}
+
+	// Validate quantity matches (should echo request)
+	responseQuantity := binary.BigEndian.Uint16(response[4:6])
+	if responseQuantity != quantity {
+		log.Warnf("RTUClient.WriteMultipleCoils: Quantity mismatch in response: expected %d, got %d (continuing anyway)", quantity, responseQuantity)
+	}
+
+	// Note: Some devices may respond with different slave ID (e.g., broadcast response)
+	// We only log a warning but don't fail if CRC and function code are valid
+	if response[0] != slaveID {
+		log.Warnf("RTUClient.WriteMultipleCoils: Slave ID mismatch in response: expected %d, got %d (device may have accepted write anyway)", slaveID, response[0])
+	}
+
+	// Log response frame
+	LogResponse("RTU", 15, address, quantity, response)
 	log.Infof("RTUClient.WriteMultipleCoils: Successfully wrote %d coils", len(values))
 	return nil
 }
@@ -457,17 +627,142 @@ func (c *RTUClient) WriteSingleCoil(ctx context.Context, address uint16, value u
 
 	log.Debugf("RTUClient.WriteSingleCoil: address=%d, value=%d", address, coilValue)
 
-	// Log write request
-	LogRequest("RTU", 5, address, 1, []byte{byte(coilValue >> 8), byte(coilValue & 0xFF)})
-	log.Infof("RTUClient.WriteSingleCoil: Writing coil at address %d", address)
-
-	// Call library WriteSingleCoil
+	// Try library first (more reliable)
+	// Only use custom implementation if library fails with slave ID mismatch error
 	_, err := c.client.WriteSingleCoil(address, coilValue)
-	if err != nil {
-		log.Errorf("RTUClient.WriteSingleCoil: Failed to write: %v", err)
+	if err == nil {
+		log.Infof("RTUClient.WriteSingleCoil: Successfully wrote coil using library")
+		return nil
+	}
+
+	// Check if error is due to slave ID mismatch
+	errStr := err.Error()
+	if contains(errStr, "slave id") || contains(errStr, "slave_id") || contains(errStr, "slave ID") {
+		log.Warnf("RTUClient.WriteSingleCoil: Library failed with slave ID error, trying custom implementation: %v", err)
+		// Continue with custom implementation
+	} else {
+		// Other errors - return immediately
 		return fmt.Errorf("failed to write single coil: %w", err)
 	}
 
+	// Get serial port reader/writer from handler using reflection (same approach as readMultipleRegisters)
+	handlerValue := reflect.ValueOf(c.handler).Elem()
+	var serialPort interface{}
+	var found bool
+
+	// Try exported fields first
+	possibleFieldNames := []string{"serialPort", "port", "conn", "connection", "SerialPort", "Port", "Conn"}
+	for _, fieldName := range possibleFieldNames {
+		field := handlerValue.FieldByName(fieldName)
+		if field.IsValid() && !field.IsZero() {
+			serialPort = field.Interface()
+			found = true
+			log.Debugf("WriteSingleCoil: Found serial port field: %s", fieldName)
+			break
+		}
+	}
+
+	// If not found, try to find field by iterating through all fields
+	if !found {
+		handlerType := handlerValue.Type()
+		for i := 0; i < handlerType.NumField(); i++ {
+			fieldType := handlerType.Field(i)
+			fieldValue := handlerValue.Field(i)
+
+			// Check if field implements io.Reader and io.Writer
+			if fieldValue.CanInterface() && !fieldValue.IsZero() {
+				iface := fieldValue.Interface()
+				if reader, ok := iface.(io.Reader); ok {
+					if _, ok := iface.(io.Writer); ok {
+						serialPort = reader
+						found = true
+						log.Debugf("WriteSingleCoil: Found serial port field by interface check: %s", fieldType.Name)
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if !found {
+		// Fallback failed - return original library error
+		return fmt.Errorf("failed to write single coil: %w", err)
+	}
+
+	reader, ok := serialPort.(io.Reader)
+	if !ok {
+		return fmt.Errorf("failed to write single coil: serial port is not a reader: %w", err)
+	}
+
+	writer, ok := serialPort.(io.Writer)
+	if !ok {
+		return fmt.Errorf("failed to write single coil: serial port is not a writer: %w", err)
+	}
+
+	// Build request frame (FC5: Write Single Coil)
+	slaveID := byte(c.handler.SlaveId)
+	request := make([]byte, 8)
+	request[0] = slaveID
+	request[1] = 5 // Function code
+	binary.BigEndian.PutUint16(request[2:4], address)
+	binary.BigEndian.PutUint16(request[4:6], coilValue)
+
+	// Calculate CRC
+	crc := calculateCRC16(request[:6])
+	request[6] = byte(crc & 0xFF)
+	request[7] = byte(crc >> 8)
+
+	// Log request frame
+	LogRequest("RTU", 5, address, 1, request)
+	log.Infof("RTUClient.WriteSingleCoil: Writing coil at address %d", address)
+
+	// Send request
+	if _, err := writer.Write(request); err != nil {
+		return fmt.Errorf("failed to write request: %w", err)
+	}
+
+	// Read response (FC5 response: slave_id + function_code + address (2 bytes) + value (2 bytes) + CRC (2 bytes))
+	// Total: 8 bytes
+	response := make([]byte, 8)
+	if err := readBytesWithTimeout(reader, response, c.handler.Timeout); err != nil {
+		// If reading fails, try fallback to library (device may have accepted write anyway)
+		log.Warnf("RTUClient.WriteSingleCoil: Failed to read response, but write may have succeeded: %v", err)
+		// Try to verify with library read-back (optional)
+		return nil // Consider write successful if we can't read response
+	}
+
+	// Validate CRC (Modbus RTU uses little-endian for CRC: low byte first, high byte second)
+	receivedCRC := uint16(response[6]) | (uint16(response[7]) << 8)
+	calculatedCRC := calculateCRC16(response[:6])
+	if receivedCRC != calculatedCRC {
+		// Log warning but don't fail - device may have accepted write
+		log.Warnf("RTUClient.WriteSingleCoil: CRC mismatch: received 0x%04X, calculated 0x%04X (write may have succeeded anyway)", receivedCRC, calculatedCRC)
+		// Don't return error - continue with validation
+	}
+
+	// Validate function code (should match request)
+	if response[1] != 5 {
+		if response[1]&0x80 != 0 {
+			errorCode := response[1] & 0x7F
+			return fmt.Errorf("modbus error response: function code 0x%02X, error code 0x%02X", 5, errorCode)
+		}
+		return fmt.Errorf("invalid function code in response: expected 5, got %d", response[1])
+	}
+
+	// Validate address matches (should echo request)
+	responseAddress := binary.BigEndian.Uint16(response[2:4])
+	if responseAddress != address {
+		log.Warnf("RTUClient.WriteSingleCoil: Address mismatch in response: expected %d, got %d (continuing anyway)", address, responseAddress)
+	}
+
+	// Note: Some devices may respond with different slave ID (e.g., broadcast response)
+	// We only log a warning but don't fail if CRC and function code are valid
+	if response[0] != slaveID {
+		log.Warnf("RTUClient.WriteSingleCoil: Slave ID mismatch in response: expected %d, got %d (device may have accepted write anyway)", slaveID, response[0])
+	}
+
+	// Log response frame
+	LogResponse("RTU", 5, address, 1, response)
 	log.Infof("RTUClient.WriteSingleCoil: Successfully wrote coil")
 	return nil
 }

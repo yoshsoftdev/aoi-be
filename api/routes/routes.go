@@ -74,7 +74,7 @@ func SetupRoutes(
 			cache,
 			formulaEngine,
 		)
-		paramHandler := handlers.NewParameterHandler(paramService, writeService, schedulerManager)
+		paramHandler := handlers.NewParameterHandler(paramService, writeService, schedulerManager, formulaEngine)
 		params := v1.Group("/parameters")
 		{
 			params.GET("", paramHandler.GetAll)

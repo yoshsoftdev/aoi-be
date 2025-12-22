@@ -64,11 +64,33 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 
 	// Create Modbus client using device config and parameter-level slave_id
 	slaveID := &config.SlaveID
+	log := logger.GetLogger()
+	log.Infof("[READ] Creating Modbus RTU client: parameter_id=%d, device_id=%d, device_nama=%s, port=%s, baud=%d, slave_id=%d, timeout_ms=%d",
+		config.IDParameter, device.ID, device.Nama,
+		func() string {
+			if device.Port != nil {
+				return *device.Port
+			} else {
+				return "nil"
+			}
+		}(),
+		func() int {
+			if device.Baud != nil {
+				return *device.Baud
+			} else {
+				return 0
+			}
+		}(),
+		*slaveID,
+		device.TimeoutMs)
+
 	client, err := modbus.NewRTUClient(device, slaveID)
 	if err != nil {
+		log.Errorf("[READ] Failed to create Modbus RTU client: parameter_id=%d, error=%v", config.IDParameter, err)
 		return fmt.Errorf("failed to create Modbus RTU client: %w", err)
 	}
 	defer client.Close()
+	log.Debugf("[READ] Modbus RTU client created successfully: parameter_id=%d", config.IDParameter)
 
 	// Validate function code
 	if config.FunctionCode == 0 {
@@ -78,11 +100,16 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 	}
 
 	// Read registers
+	log.Debugf("[READ] Reading Modbus: parameter_id=%d, function_code=%d, address=%d, quantity=%d",
+		config.IDParameter, config.FunctionCode, config.RegisterAddress, config.Quantity)
 	data, err := client.Read(ctx, config.FunctionCode, uint16(config.RegisterAddress), uint16(config.Quantity))
 	if err != nil {
+		log.Errorf("[READ] Failed to read Modbus: parameter_id=%d, function_code=%d, address=%d, quantity=%d, error=%v, error_type=%T",
+			config.IDParameter, config.FunctionCode, config.RegisterAddress, config.Quantity, err, err)
 		w.handleError(config.IDParameter, param.Nama, param.Type, err)
 		return err
 	}
+	log.Debugf("[READ] Successfully read Modbus: parameter_id=%d, bytes_received=%d", config.IDParameter, len(data))
 
 	// Log raw data received
 	logger.GetLogger().Debugf("Parameter %d (%s): Raw data received: %v (hex: %X), length: %d bytes",
@@ -211,12 +238,18 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 	cacheKey := fmt.Sprintf("parameter:raw:%d", config.IDParameter)
 	if err := w.cache.Set(cacheKey, realtimeData, 24*time.Hour); err != nil {
 		logger.GetLogger().Warnf("Failed to save raw data to cache: %v", err)
+	} else {
+		logger.GetLogger().Infof("[READ] Raw parameter cached: parameter_id=%d, parameter_nama=%s, raw_value=%v, processed_value=%v, cache_key=%s",
+			config.IDParameter, param.Nama, realtimeData.RawValue, realtimeData.ProcessedValue, cacheKey)
 	}
 
 	// NOTIFY Formula Engine (do not broadcast)
 	// Formula Engine will evaluate formulas and broadcast clean data
 	if w.formulaEngine != nil {
+		logger.GetLogger().Debugf("[READ] Notifying Formula Engine: parameter_id=%d", config.IDParameter)
 		w.formulaEngine.OnRawParameterUpdated(config.IDParameter, &realtimeData)
+	} else {
+		logger.GetLogger().Warnf("[READ] Formula Engine is nil, cannot notify: parameter_id=%d", config.IDParameter)
 	}
 
 	return nil

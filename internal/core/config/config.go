@@ -61,8 +61,8 @@ func Load() (*Config, error) {
 	viper.SetDefault("REDIS_PORT", "6379")
 	viper.SetDefault("REDIS_PASSWORD", "")
 	viper.SetDefault("REDIS_DB", 0)
-	viper.SetDefault("LOG_LEVEL", "info")
-	viper.SetDefault("LOG_FORMAT", "json")
+	viper.SetDefault("LOG_LEVEL", "debug")
+	viper.SetDefault("LOG_FORMAT", "text")
 	viper.SetDefault("APP_NAME", "AOI System")
 	viper.SetDefault("APP_ENV", "development")
 

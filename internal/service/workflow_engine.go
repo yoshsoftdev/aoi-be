@@ -256,12 +256,10 @@ func (e *WorkflowEngine) executeAction(workflowID uint, action domain.WorkflowAc
 	log := logger.GetLogger()
 
 	switch action.ActionType {
-	case "write":
+	case "TRIGGER_WRITE":
+		// TRIGGER_WRITE: trigger PRESET parameter (no value sent)
 		if action.ParameterID == nil {
-			return fmt.Errorf("parameter_id is required for write action")
-		}
-		if action.Value == nil {
-			return fmt.Errorf("value is required for write action")
+			return fmt.Errorf("parameter_id is required for TRIGGER_WRITE action")
 		}
 
 		// Validate parameter is WRITE type
@@ -274,8 +272,107 @@ func (e *WorkflowEngine) executeAction(workflowID uint, action domain.WorkflowAc
 			return fmt.Errorf("parameter %d is not a WRITE parameter", *action.ParameterID)
 		}
 
+		// Validate write_mode is PRESET
+		if param.WriteMode == nil || *param.WriteMode != "PRESET" {
+			return fmt.Errorf("parameter %d is not a PRESET parameter (write_mode must be PRESET for TRIGGER_WRITE)", *action.ParameterID)
+		}
+
+		// Validate preset_value exists
+		if param.PresetValue == nil || *param.PresetValue == "" {
+			return fmt.Errorf("parameter %d is PRESET but has no preset_value", *action.ParameterID)
+		}
+
+		// GUARD: Prevent value from being sent to PRESET parameter
+		if action.Value != nil {
+			return fmt.Errorf("TRIGGER_WRITE action cannot send value to PRESET parameter %d", *action.ParameterID)
+		}
+
+		// Execute trigger via WriteService (TRIGGER mode uses preset_value from parameter)
+		log.Infof("WorkflowEngine: Executing TRIGGER_WRITE action: workflow=%d, parameter=%d (PRESET)", workflowID, *action.ParameterID)
+
+		ctx := context.Background()
+		writeReq := WriteRequest{
+			Mode: "TRIGGER", // New mode for triggering PRESET parameters
+		}
+
+		result, err := e.writeService.Write(ctx, *action.ParameterID, writeReq)
+		if err != nil {
+			return fmt.Errorf("write service error: %w", err)
+		}
+
+		if !result.Success {
+			return fmt.Errorf("write failed: %s", result.Error)
+		}
+
+		log.Infof("WorkflowEngine: TRIGGER_WRITE action successful: workflow=%d, parameter=%d", workflowID, *action.ParameterID)
+
+	case "WRITE_WITH_VALUE":
+		// WRITE_WITH_VALUE: write DYNAMIC parameter (value required)
+		if action.ParameterID == nil {
+			return fmt.Errorf("parameter_id is required for WRITE_WITH_VALUE action")
+		}
+		if action.Value == nil {
+			return fmt.Errorf("value is required for WRITE_WITH_VALUE action")
+		}
+
+		// Validate parameter is WRITE type
+		param, err := e.paramRepo.GetByID(*action.ParameterID)
+		if err != nil {
+			return fmt.Errorf("failed to get parameter %d: %w", *action.ParameterID, err)
+		}
+
+		if param.Direction != "WRITE" {
+			return fmt.Errorf("parameter %d is not a WRITE parameter", *action.ParameterID)
+		}
+
+		// Validate write_mode is DYNAMIC
+		if param.WriteMode == nil || *param.WriteMode != "DYNAMIC" {
+			return fmt.Errorf("parameter %d is not a DYNAMIC parameter (write_mode must be DYNAMIC for WRITE_WITH_VALUE)", *action.ParameterID)
+		}
+
 		// Execute write via WriteService
-		log.Infof("WorkflowEngine: Executing write action: workflow=%d, parameter=%d, value=%f", workflowID, *action.ParameterID, *action.Value)
+		log.Infof("WorkflowEngine: Executing WRITE_WITH_VALUE action: workflow=%d, parameter=%d, value=%f (DYNAMIC)", workflowID, *action.ParameterID, *action.Value)
+
+		ctx := context.Background()
+		writeReq := WriteRequest{
+			Mode:  "MANUAL",
+			Value: action.Value,
+		}
+
+		result, err := e.writeService.Write(ctx, *action.ParameterID, writeReq)
+		if err != nil {
+			return fmt.Errorf("write service error: %w", err)
+		}
+
+		if !result.Success {
+			return fmt.Errorf("write failed: %s", result.Error)
+		}
+
+		log.Infof("WorkflowEngine: WRITE_WITH_VALUE action successful: workflow=%d, parameter=%d", workflowID, *action.ParameterID)
+
+	case "write":
+		// Legacy support: treat as WRITE_WITH_VALUE
+		log.Warnf("WorkflowEngine: Legacy 'write' action type detected, treating as WRITE_WITH_VALUE")
+		if action.ParameterID == nil {
+			return fmt.Errorf("parameter_id is required for write action")
+		}
+		if action.Value == nil {
+			return fmt.Errorf("value is required for write action")
+		}
+
+		param, err := e.paramRepo.GetByID(*action.ParameterID)
+		if err != nil {
+			return fmt.Errorf("failed to get parameter %d: %w", *action.ParameterID, err)
+		}
+
+		if param.Direction != "WRITE" {
+			return fmt.Errorf("parameter %d is not a WRITE parameter", *action.ParameterID)
+		}
+
+		// Check write_mode and validate accordingly
+		if param.WriteMode != nil && *param.WriteMode == "PRESET" {
+			return fmt.Errorf("cannot send value to PRESET parameter %d, use TRIGGER_WRITE action instead", *action.ParameterID)
+		}
 
 		ctx := context.Background()
 		writeReq := WriteRequest{

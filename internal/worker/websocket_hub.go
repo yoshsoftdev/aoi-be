@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"aoi-backend/internal/core/logger"
 	"aoi-backend/internal/domain"
 
 	"github.com/gorilla/websocket"
@@ -49,9 +50,23 @@ func (h *WebSocketHub) Run() {
 			for conn := range h.clients {
 				clients = append(clients, conn)
 			}
+			clientCount := len(clients)
 			h.mu.RUnlock()
 
+			// Log broadcast details
+			var msgData map[string]interface{}
+			if err := json.Unmarshal(message, &msgData); err == nil {
+				if data, ok := msgData["data"].(map[string]interface{}); ok {
+					paramID, _ := data["parameter_id"].(float64)
+					paramName, _ := data["parameter_nama"].(string)
+					value := data["value"]
+					logger.GetLogger().Infof("[BROADCAST] Sending to %d clients: parameter_id=%v, parameter_nama=%s, value=%v, type=%v",
+						clientCount, uint(paramID), paramName, value, msgData["type"])
+				}
+			}
+
 			// Send message to all clients
+			sentCount := 0
 			for _, conn := range clients {
 				err := conn.WriteMessage(websocket.TextMessage, message)
 				if err != nil {
@@ -59,7 +74,13 @@ func (h *WebSocketHub) Run() {
 					delete(h.clients, conn)
 					h.mu.Unlock()
 					conn.Close()
+					logger.GetLogger().Warnf("[BROADCAST] Failed to send to client, removed: %v", err)
+				} else {
+					sentCount++
 				}
+			}
+			if sentCount > 0 {
+				logger.GetLogger().Debugf("[BROADCAST] Successfully sent to %d/%d clients", sentCount, clientCount)
 			}
 		}
 	}
@@ -77,9 +98,13 @@ func (h *WebSocketHub) Unregister(conn *websocket.Conn) {
 // This method implements the service.WebSocketBroadcaster interface
 // IMPORTANT: Only formula parameters should call this - raw parameters are internal only
 func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
+	log := logger.GetLogger()
+
 	// GUARD: Only broadcast formula parameters (clean data)
 	// Raw parameters should never reach here
 	// This is a safety check - workers should not call this
+	log.Infof("[BROADCAST] BroadcastDataUpdate called: parameter_id=%d, parameter_nama=%s, parameter_type=%s, value=%v, device_nama=%s",
+		data.ParameterID, data.ParameterNama, data.ParameterType, data.ProcessedValue, data.DeviceNama)
 
 	// Create DashboardData payload compatible with frontend
 	// Frontend expects: parameter_id, device_nama, parameter_nama, value, timestamp, status
@@ -100,9 +125,11 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 
 	bytes, err := json.Marshal(message)
 	if err != nil {
+		log.Errorf("[BROADCAST] Failed to marshal broadcast message: %v", err)
 		return
 	}
 
+	log.Debugf("[BROADCAST] Queuing broadcast message: %d bytes, parameter_id=%d", len(bytes), data.ParameterID)
 	h.broadcast <- bytes
 }
 

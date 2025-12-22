@@ -47,10 +47,11 @@ func NewWriteService(
 
 // WriteRequest represents a write request
 type WriteRequest struct {
-	Mode           string   `json:"mode"`                      // TEST, MANUAL, PRESET
+	Mode           string   `json:"mode"`                      // TEST, MANUAL, PRESET, TRIGGER
 	Value          *float64 `json:"value,omitempty"`           // For MANUAL mode (scalar value)
 	RegisterValues []uint16 `json:"register_values,omitempty"` // For MANUAL mode (raw register values)
-	PresetID       *uint    `json:"preset_id,omitempty"`       // For PRESET mode
+	PresetID       *uint    `json:"preset_id,omitempty"`       // For PRESET mode (legacy)
+	// TRIGGER mode: uses preset_value from parameter (for workflow triggering PRESET parameters)
 }
 
 // WriteResponse represents the result of a write operation
@@ -206,7 +207,73 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 			}, nil
 		}
 
+	case "TRIGGER":
+		// TRIGGER mode: use preset_value from parameter (for workflow triggering PRESET parameters)
+		// GUARD: Only valid for PRESET write_mode parameters
+		if param.WriteMode == nil || *param.WriteMode != "PRESET" {
+			return &WriteResponse{
+				Success: false,
+				Error:   "TRIGGER mode can only be used for parameters with write_mode=PRESET",
+			}, nil
+		}
+
+		// GUARD: Prevent value from being sent in TRIGGER mode
+		if req.Value != nil {
+			return &WriteResponse{
+				Success: false,
+				Error:   "TRIGGER mode cannot accept value, use preset_value from parameter",
+			}, nil
+		}
+
+		if param.PresetValue == nil || *param.PresetValue == "" {
+			return &WriteResponse{
+				Success: false,
+				Error:   "Parameter has no preset_value for TRIGGER mode",
+			}, nil
+		}
+
+		// Parse preset_value from parameter
+		// Format: JSON string containing value or register_values
+		var presetData map[string]interface{}
+		if err := json.Unmarshal([]byte(*param.PresetValue), &presetData); err != nil {
+			return &WriteResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Invalid preset_value format: %v", err),
+			}, nil
+		}
+
+		// Check if it's scalar or raw register format
+		if value, ok := presetData["value"].(float64); ok {
+			// Scalar value
+			writeValue = value
+			log.Infof("Write TRIGGER mode for parameter %d: using preset_value (scalar)=%f", parameterID, writeValue)
+		} else if regValues, ok := presetData["register_values"].([]interface{}); ok {
+			// Raw register values
+			registerValues = make([]uint16, 0, len(regValues))
+			for _, v := range regValues {
+				if fv, ok := v.(float64); ok {
+					registerValues = append(registerValues, uint16(fv))
+				}
+			}
+
+			// Validate length matches quantity
+			if len(registerValues) != getQuantity() {
+				return &WriteResponse{
+					Success: false,
+					Error:   fmt.Sprintf("Preset register_values length (%d) must match quantity (%d)", len(registerValues), getQuantity()),
+				}, nil
+			}
+
+			log.Infof("Write TRIGGER mode for parameter %d: using preset_value (registers)=%v", parameterID, registerValues)
+		} else {
+			return &WriteResponse{
+				Success: false,
+				Error:   "Invalid preset_value format: must contain 'value' or 'register_values'",
+			}, nil
+		}
+
 	case "PRESET":
+		// Legacy PRESET mode: use parameter_preset table
 		if req.PresetID == nil {
 			return &WriteResponse{
 				Success: false,
