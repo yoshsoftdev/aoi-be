@@ -135,7 +135,7 @@ func SetupRoutes(
 		}
 
 		// Write
-		writeHandler := handlers.NewWriteHandler(writeService)
+		writeHandler := handlers.NewWriteHandler(writeService, schedulerManager)
 		write := v1.Group("/write")
 		{
 			write.POST("/execute", writeHandler.Execute)

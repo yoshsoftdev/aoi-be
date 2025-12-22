@@ -4,18 +4,27 @@ import (
 	"fmt"
 	"net/http"
 
+	"aoi-backend/internal/core/logger"
+	"aoi-backend/internal/repository"
+	"aoi-backend/internal/scheduler"
 	"aoi-backend/internal/service"
 
 	"github.com/gin-gonic/gin"
 )
 
 type WriteHandler struct {
-	writeService *service.WriteService
+	writeService     *service.WriteService
+	schedulerManager *scheduler.SchedulerManager
+	paramRepo        repository.ParameterRepository
+	deviceRepo       repository.DeviceRepository
 }
 
-func NewWriteHandler(writeService *service.WriteService) *WriteHandler {
+func NewWriteHandler(writeService *service.WriteService, schedulerManager *scheduler.SchedulerManager) *WriteHandler {
 	return &WriteHandler{
-		writeService: writeService,
+		writeService:     writeService,
+		schedulerManager: schedulerManager,
+		paramRepo:        repository.NewParameterRepository(),
+		deviceRepo:       repository.NewDeviceRepository(),
 	}
 }
 
@@ -98,6 +107,32 @@ func (h *WriteHandler) Execute(c *gin.Context) {
 			})
 			return
 		}
+	}
+
+	// Get parameter to get device_id for locking
+	param, err := h.paramRepo.GetByID(req.ParameterID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ExecuteWriteResponse{
+			Success: false,
+			Message: "Parameter not found",
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	// Get device for connection name
+	device, err := h.deviceRepo.GetByID(param.DeviceID)
+	connectionName := "Unknown"
+	if err == nil {
+		connectionName = device.Nama
+	}
+
+	// Lock connection during write
+	if h.schedulerManager != nil {
+		h.schedulerManager.LockConnection(param.DeviceID, fmt.Sprintf("write_operation: parameter_id=%d", req.ParameterID))
+		defer h.schedulerManager.UnlockConnection(param.DeviceID, fmt.Sprintf("write_operation: parameter_id=%d", req.ParameterID))
+		logger.GetLogger().Infof("[WRITE] Connection locked: connection_id=%d, connection_name=%s, parameter_id=%d",
+			param.DeviceID, connectionName, req.ParameterID)
 	}
 
 	// Execute write
@@ -190,6 +225,21 @@ func (h *WriteHandler) TestWrite(c *gin.Context) {
 	}
 	if req.ByteOrder == "" {
 		req.ByteOrder = "ABCD"
+	}
+
+	// Get device for connection name
+	device, err := h.deviceRepo.GetByID(req.DeviceID)
+	connectionName := "Unknown"
+	if err == nil {
+		connectionName = device.Nama
+	}
+
+	// Lock connection during test write
+	if h.schedulerManager != nil {
+		h.schedulerManager.LockConnection(req.DeviceID, fmt.Sprintf("test_write: device_id=%d", req.DeviceID))
+		defer h.schedulerManager.UnlockConnection(req.DeviceID, fmt.Sprintf("test_write: device_id=%d", req.DeviceID))
+		logger.GetLogger().Infof("[WRITE] Connection locked: connection_id=%d, connection_name=%s, test_write",
+			req.DeviceID, connectionName)
 	}
 
 	// Build test write config
