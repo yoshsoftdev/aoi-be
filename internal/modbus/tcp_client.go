@@ -108,6 +108,7 @@ func (c *TCPClient) Write(ctx context.Context, functionCode int, address uint16,
 }
 
 // WriteMultipleRegisters writes multiple registers using function code 16
+// Format: Same as modpoll - writes multiple values in sequence
 func (c *TCPClient) WriteMultipleRegisters(ctx context.Context, address uint16, values []uint16) error {
 	if len(values) == 0 {
 		return fmt.Errorf("values array cannot be empty")
@@ -116,19 +117,88 @@ func (c *TCPClient) WriteMultipleRegisters(ctx context.Context, address uint16, 
 		return fmt.Errorf("maximum 123 registers can be written at once")
 	}
 
-	// Convert []uint16 to []byte (2 bytes per register)
+	// Convert []uint16 to []byte (2 bytes per register, Big Endian)
+	// Format: [high_byte_0, low_byte_0, high_byte_1, low_byte_1, ...]
+	// This matches modpoll's format for Write Multiple Registers (FC16)
 	bytes := make([]byte, len(values)*2)
 	for i, v := range values {
-		bytes[i*2] = byte(v >> 8)     // High byte
-		bytes[i*2+1] = byte(v & 0xFF) // Low byte
+		bytes[i*2] = byte(v >> 8)     // High byte (MSB)
+		bytes[i*2+1] = byte(v & 0xFF) // Low byte (LSB)
 	}
 
 	// Log write request (data bytes)
 	LogRequest("TCP", 16, address, uint16(len(values)), bytes)
 
+	// Call library WriteMultipleRegisters
+	// Signature: WriteMultipleRegisters(address, quantity uint16, value []byte)
 	_, err := c.client.WriteMultipleRegisters(address, uint16(len(values)), bytes)
 	if err != nil {
 		return fmt.Errorf("failed to write multiple registers: %w", err)
+	}
+
+	return nil
+}
+
+// WriteMultipleCoils writes multiple coils using function code 15
+// Format: Coils are bit-packed (1 bit per coil)
+// Example: 8 coils with values [1,1,1,1,1,1,1,1] = 1 byte: 0xFF
+func (c *TCPClient) WriteMultipleCoils(ctx context.Context, address uint16, values []uint16) error {
+	if len(values) == 0 {
+		return fmt.Errorf("values array cannot be empty")
+	}
+	if len(values) > 1968 {
+		return fmt.Errorf("maximum 1968 coils can be written at once")
+	}
+
+	// Convert []uint16 to []byte (bit-packed, 1 bit per coil)
+	// Format: [byte_count, coil_bytes...]
+	// Each coil value should be 0 or 1 (OFF or ON)
+	byteCount := (len(values) + 7) / 8 // Round up to nearest byte
+	coilBytes := make([]byte, byteCount)
+
+	for i, v := range values {
+		// Ensure value is 0 or 1
+		bitValue := uint8(0)
+		if v != 0 {
+			bitValue = 1
+		}
+
+		// Pack bits into bytes
+		byteIndex := i / 8
+		bitIndex := i % 8
+		if bitValue == 1 {
+			coilBytes[byteIndex] |= (1 << bitIndex)
+		}
+	}
+
+	// Log write request
+	LogRequest("TCP", 15, address, uint16(len(values)), coilBytes)
+
+	// Call library WriteMultipleCoils
+	// Signature: WriteMultipleCoils(address, quantity uint16, value []byte)
+	_, err := c.client.WriteMultipleCoils(address, uint16(len(values)), coilBytes)
+	if err != nil {
+		return fmt.Errorf("failed to write multiple coils: %w", err)
+	}
+
+	return nil
+}
+
+// WriteSingleCoil writes a single coil using function code 5
+func (c *TCPClient) WriteSingleCoil(ctx context.Context, address uint16, value uint16) error {
+	// Ensure value is 0 or 1
+	coilValue := uint16(0)
+	if value != 0 {
+		coilValue = 0xFF00 // Modbus convention: 0xFF00 = ON, 0x0000 = OFF
+	}
+
+	// Log write request
+	LogRequest("TCP", 5, address, 1, []byte{byte(coilValue >> 8), byte(coilValue & 0xFF)})
+
+	// Call library WriteSingleCoil
+	_, err := c.client.WriteSingleCoil(address, coilValue)
+	if err != nil {
+		return fmt.Errorf("failed to write single coil: %w", err)
 	}
 
 	return nil

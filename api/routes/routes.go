@@ -139,6 +139,7 @@ func SetupRoutes(
 		write := v1.Group("/write")
 		{
 			write.POST("/execute", writeHandler.Execute)
+			write.POST("/test", writeHandler.TestWrite)
 		}
 
 		// Workflow

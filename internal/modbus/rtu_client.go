@@ -349,7 +349,12 @@ func (c *RTUClient) Write(ctx context.Context, functionCode int, address uint16,
 }
 
 // WriteMultipleRegisters writes multiple registers using function code 16
+// Format: Same as modpoll - writes multiple values in sequence
+// Example: modpoll -m rtu -b 9600 -p none -a 4 -r 0 -c 8 COM5 1 1 1 1 1 1 1 1
+// This will write 8 registers starting at address 0, each with value 1
 func (c *RTUClient) WriteMultipleRegisters(ctx context.Context, address uint16, values []uint16) error {
+	log := logger.GetLogger()
+
 	if len(values) == 0 {
 		return fmt.Errorf("values array cannot be empty")
 	}
@@ -357,21 +362,113 @@ func (c *RTUClient) WriteMultipleRegisters(ctx context.Context, address uint16, 
 		return fmt.Errorf("maximum 123 registers can be written at once")
 	}
 
+	log.Debugf("RTUClient.WriteMultipleRegisters: address=%d, quantity=%d, values=%v", address, len(values), values)
+
 	// Convert []uint16 to []byte (2 bytes per register, Big Endian)
+	// Format: [high_byte_0, low_byte_0, high_byte_1, low_byte_1, ...]
+	// This matches modpoll's format for Write Multiple Registers (FC16)
 	bytes := make([]byte, len(values)*2)
 	for i, v := range values {
-		bytes[i*2] = byte(v >> 8)     // High byte
-		bytes[i*2+1] = byte(v & 0xFF) // Low byte
+		bytes[i*2] = byte(v >> 8)     // High byte (MSB)
+		bytes[i*2+1] = byte(v & 0xFF) // Low byte (LSB)
+		log.Debugf("RTUClient.WriteMultipleRegisters: Register[%d] = %d (0x%04X) -> bytes[%d:%d] = [0x%02X, 0x%02X]",
+			i, v, v, i*2, i*2+2, bytes[i*2], bytes[i*2+1])
 	}
 
-	// Log write request (data bytes)
+	// Log write request (data bytes) - shows hex format like modpoll
 	LogRequest("RTU", 16, address, uint16(len(values)), bytes)
+	log.Infof("RTUClient.WriteMultipleRegisters: Writing %d registers starting at address %d", len(values), address)
 
+	// Call library WriteMultipleRegisters
+	// Signature: WriteMultipleRegisters(address, quantity uint16, value []byte)
 	_, err := c.client.WriteMultipleRegisters(address, uint16(len(values)), bytes)
 	if err != nil {
+		log.Errorf("RTUClient.WriteMultipleRegisters: Failed to write: %v", err)
 		return fmt.Errorf("failed to write multiple registers: %w", err)
 	}
 
+	log.Infof("RTUClient.WriteMultipleRegisters: Successfully wrote %d registers", len(values))
+	return nil
+}
+
+// WriteMultipleCoils writes multiple coils using function code 15
+// Format: Coils are bit-packed (1 bit per coil)
+// Example: 8 coils with values [1,1,1,1,1,1,1,1] = 1 byte: 0xFF
+func (c *RTUClient) WriteMultipleCoils(ctx context.Context, address uint16, values []uint16) error {
+	log := logger.GetLogger()
+
+	if len(values) == 0 {
+		return fmt.Errorf("values array cannot be empty")
+	}
+	if len(values) > 1968 {
+		return fmt.Errorf("maximum 1968 coils can be written at once")
+	}
+
+	log.Debugf("RTUClient.WriteMultipleCoils: address=%d, quantity=%d, values=%v", address, len(values), values)
+
+	// Convert []uint16 to []byte (bit-packed, 1 bit per coil)
+	// Format: [byte_count, coil_bytes...]
+	// Each coil value should be 0 or 1 (OFF or ON)
+	byteCount := (len(values) + 7) / 8 // Round up to nearest byte
+	coilBytes := make([]byte, byteCount)
+
+	for i, v := range values {
+		// Ensure value is 0 or 1
+		bitValue := uint8(0)
+		if v != 0 {
+			bitValue = 1
+		}
+
+		// Pack bits into bytes
+		byteIndex := i / 8
+		bitIndex := i % 8
+		if bitValue == 1 {
+			coilBytes[byteIndex] |= (1 << bitIndex)
+		}
+	}
+
+	log.Debugf("RTUClient.WriteMultipleCoils: Packed %d coils into %d bytes: %v", len(values), byteCount, coilBytes)
+
+	// Log write request
+	LogRequest("RTU", 15, address, uint16(len(values)), coilBytes)
+	log.Infof("RTUClient.WriteMultipleCoils: Writing %d coils starting at address %d", len(values), address)
+
+	// Call library WriteMultipleCoils
+	// Signature: WriteMultipleCoils(address, quantity uint16, value []byte)
+	_, err := c.client.WriteMultipleCoils(address, uint16(len(values)), coilBytes)
+	if err != nil {
+		log.Errorf("RTUClient.WriteMultipleCoils: Failed to write: %v", err)
+		return fmt.Errorf("failed to write multiple coils: %w", err)
+	}
+
+	log.Infof("RTUClient.WriteMultipleCoils: Successfully wrote %d coils", len(values))
+	return nil
+}
+
+// WriteSingleCoil writes a single coil using function code 5
+func (c *RTUClient) WriteSingleCoil(ctx context.Context, address uint16, value uint16) error {
+	log := logger.GetLogger()
+
+	// Ensure value is 0 or 1
+	coilValue := uint16(0)
+	if value != 0 {
+		coilValue = 0xFF00 // Modbus convention: 0xFF00 = ON, 0x0000 = OFF
+	}
+
+	log.Debugf("RTUClient.WriteSingleCoil: address=%d, value=%d", address, coilValue)
+
+	// Log write request
+	LogRequest("RTU", 5, address, 1, []byte{byte(coilValue >> 8), byte(coilValue & 0xFF)})
+	log.Infof("RTUClient.WriteSingleCoil: Writing coil at address %d", address)
+
+	// Call library WriteSingleCoil
+	_, err := c.client.WriteSingleCoil(address, coilValue)
+	if err != nil {
+		log.Errorf("RTUClient.WriteSingleCoil: Failed to write: %v", err)
+		return fmt.Errorf("failed to write single coil: %w", err)
+	}
+
+	log.Infof("RTUClient.WriteSingleCoil: Successfully wrote coil")
 	return nil
 }
 

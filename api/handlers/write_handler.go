@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 
 	"aoi-backend/internal/service"
@@ -120,6 +121,105 @@ func (h *WriteHandler) Execute(c *gin.Context) {
 		if val, ok := result.ReadBackValue.(float64); ok {
 			response.ReadBackValue = &val
 		}
+	}
+	if result.Error != "" {
+		response.Error = result.Error
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// TestWriteRequest represents a test write request without parameter_id
+type TestWriteRequest struct {
+	DeviceID        uint     `json:"device_id" binding:"required"`
+	Protocol        string   `json:"protocol" binding:"required,oneof=modbus_rtu modbus_tcp"`
+	SlaveID         int      `json:"slave_id" binding:"required,min=1,max=247"`
+	FunctionCode    int      `json:"function_code" binding:"required,oneof=5 6 15 16"`
+	RegisterAddress *int     `json:"register_address" binding:"required"` // Use pointer to distinguish between 0 and not provided
+	Quantity        int      `json:"quantity" binding:"required,min=1,max=123"`
+	DataType        string   `json:"data_type,omitempty"`
+	ByteOrder       string   `json:"byte_order,omitempty"`
+	RegisterValues  []uint16 `json:"register_values" binding:"required"`
+}
+
+// TestWrite handles POST /api/write/test
+// This endpoint allows testing write operations without creating a parameter in database
+func (h *WriteHandler) TestWrite(c *gin.Context) {
+	var req TestWriteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, ExecuteWriteResponse{
+			Success: false,
+			Message: "Invalid request",
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	// Validate RegisterAddress (using pointer to allow 0 as valid value)
+	if req.RegisterAddress == nil {
+		c.JSON(http.StatusBadRequest, ExecuteWriteResponse{
+			Success: false,
+			Message: "Invalid request",
+			Error:   "register_address is required",
+		})
+		return
+	}
+
+	if *req.RegisterAddress < 0 || *req.RegisterAddress > 65535 {
+		c.JSON(http.StatusBadRequest, ExecuteWriteResponse{
+			Success: false,
+			Message: "Invalid request",
+			Error:   fmt.Sprintf("register_address must be between 0 and 65535, got %d", *req.RegisterAddress),
+		})
+		return
+	}
+
+	// Validate register values length matches quantity
+	if len(req.RegisterValues) != req.Quantity {
+		c.JSON(http.StatusBadRequest, ExecuteWriteResponse{
+			Success: false,
+			Message: "Invalid request",
+			Error:   fmt.Sprintf("Register values length (%d) must match quantity (%d)", len(req.RegisterValues), req.Quantity),
+		})
+		return
+	}
+
+	// Set defaults
+	if req.DataType == "" {
+		req.DataType = "uint16"
+	}
+	if req.ByteOrder == "" {
+		req.ByteOrder = "ABCD"
+	}
+
+	// Build test write config
+	config := service.TestWriteConfig{
+		DeviceID:        req.DeviceID,
+		Protocol:        req.Protocol,
+		SlaveID:         req.SlaveID,
+		FunctionCode:    req.FunctionCode,
+		RegisterAddress: *req.RegisterAddress, // Dereference pointer
+		Quantity:        req.Quantity,
+		DataType:        req.DataType,
+		ByteOrder:       req.ByteOrder,
+		RegisterValues:  req.RegisterValues,
+	}
+
+	// Execute test write
+	result, err := h.writeService.TestWrite(c.Request.Context(), config)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ExecuteWriteResponse{
+			Success: false,
+			Message: "Test write operation failed",
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	// Build response
+	response := ExecuteWriteResponse{
+		Success: result.Success,
+		Message: result.Message,
 	}
 	if result.Error != "" {
 		response.Error = result.Error

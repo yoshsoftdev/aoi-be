@@ -188,10 +188,13 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 
 	case "MANUAL":
 		// MANUAL mode can use either Value (scalar) or RegisterValues (raw registers)
+		// Format: register_values is array of uint16 values, e.g., [1, 1, 1, 1, 1, 1, 1, 1]
+		// This matches modpoll format: modpoll ... 1 1 1 1 1 1 1 1
 		if len(req.RegisterValues) > 0 {
-			// Use raw register values directly
+			// Use raw register values directly (same format as modpoll)
 			registerValues = req.RegisterValues
-			log.Infof("Write MANUAL mode for parameter %d: register_values=%v", parameterID, registerValues)
+			log.Infof("Write MANUAL mode for parameter %d: register_values=%v (count=%d)",
+				parameterID, registerValues, len(registerValues))
 		} else if req.Value != nil {
 			// Use scalar value (will be encoded to registers)
 			writeValue = *req.Value
@@ -333,17 +336,78 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 		client = tcpClient
 	}
 
-	// 9. Write multiple registers (atomic write)
+	// 9. Write based on function code
 	address := uint16(getRegisterAddress())
-	err = client.WriteMultipleRegisters(ctx, address, registerValues)
-	if err != nil {
+	fc := getFunctionCode()
+
+	switch fc {
+	case 5: // Write Single Coil
+		if len(registerValues) != 1 {
+			return &WriteResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Write Single Coil requires exactly 1 value, got %d", len(registerValues)),
+			}, nil
+		}
+		err = client.WriteSingleCoil(ctx, address, registerValues[0])
+		if err != nil {
+			return &WriteResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to write single coil: %v", err),
+			}, nil
+		}
+
+	case 15: // Write Multiple Coils
+		err = client.WriteMultipleCoils(ctx, address, registerValues)
+		if err != nil {
+			return &WriteResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to write multiple coils: %v", err),
+			}, nil
+		}
+
+	case 6: // Write Single Register
+		if len(registerValues) != 1 {
+			return &WriteResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Write Single Register requires exactly 1 value, got %d", len(registerValues)),
+			}, nil
+		}
+		// Use WriteMultipleRegisters with quantity=1 for single register
+		err = client.WriteMultipleRegisters(ctx, address, registerValues)
+		if err != nil {
+			return &WriteResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to write single register: %v", err),
+			}, nil
+		}
+
+	case 16: // Write Multiple Registers
+		err = client.WriteMultipleRegisters(ctx, address, registerValues)
+		if err != nil {
+			return &WriteResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to write multiple registers: %v", err),
+			}, nil
+		}
+
+	default:
 		return &WriteResponse{
 			Success: false,
-			Error:   fmt.Sprintf("Failed to write registers: %v", err),
+			Error:   fmt.Sprintf("Unsupported function code for write: %d", fc),
 		}, nil
 	}
 
-	log.Infof("Successfully wrote %d registers to parameter %d", len(registerValues), parameterID)
+	// Log success message based on function code
+	switch fc {
+	case 5:
+		log.Infof("Successfully wrote single coil to parameter %d", parameterID)
+	case 15:
+		log.Infof("Successfully wrote %d coils to parameter %d", len(registerValues), parameterID)
+	case 6:
+		log.Infof("Successfully wrote single register to parameter %d", parameterID)
+	case 16:
+		log.Infof("Successfully wrote %d registers to parameter %d", len(registerValues), parameterID)
+	}
 
 	// 10. TEST mode: Don't update cache or trigger formula
 	if req.Mode == "TEST" {
@@ -422,9 +486,161 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 	}, nil
 }
 
+// TestWriteConfig represents configuration for test write without parameter_id
+type TestWriteConfig struct {
+	DeviceID        uint
+	Protocol        string // "modbus_rtu" or "modbus_tcp"
+	SlaveID         int
+	FunctionCode    int
+	RegisterAddress int
+	Quantity        int
+	DataType        string
+	ByteOrder       string
+	RegisterValues  []uint16
+}
+
+// TestWrite executes a test write operation without creating a parameter in database
+// This is used for testing write capability before saving parameter configuration
+func (s *WriteService) TestWrite(ctx context.Context, config TestWriteConfig) (*WriteResponse, error) {
+	log := logger.GetLogger()
+
+	// 1. Get device
+	device, err := s.deviceRepo.GetByID(config.DeviceID)
+	if err != nil {
+		return &WriteResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Device not found: %v", err),
+		}, nil
+	}
+
+	// 2. Validate register values length matches quantity
+	if len(config.RegisterValues) != config.Quantity {
+		return &WriteResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Register values length (%d) must match quantity (%d)", len(config.RegisterValues), config.Quantity),
+		}, nil
+	}
+
+	// 3. Create Modbus client
+	var client Client
+	switch config.Protocol {
+	case "modbus_rtu":
+		rtuClient, err := modbus.NewRTUClient(device, &config.SlaveID)
+		if err != nil {
+			return &WriteResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to create Modbus RTU client: %v", err),
+			}, nil
+		}
+		defer rtuClient.Close()
+		client = rtuClient
+
+	case "modbus_tcp":
+		tcpClient, err := modbus.NewTCPClient(device, &config.SlaveID)
+		if err != nil {
+			return &WriteResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to create Modbus TCP client: %v", err),
+			}, nil
+		}
+		defer tcpClient.Close()
+		client = tcpClient
+
+	default:
+		return &WriteResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Unsupported protocol: %s", config.Protocol),
+		}, nil
+	}
+
+	// 4. Write based on function code
+	address := uint16(config.RegisterAddress)
+	fc := config.FunctionCode
+
+	switch fc {
+	case 5: // Write Single Coil
+		if len(config.RegisterValues) != 1 {
+			return &WriteResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Write Single Coil requires exactly 1 value, got %d", len(config.RegisterValues)),
+			}, nil
+		}
+		err = client.WriteSingleCoil(ctx, address, config.RegisterValues[0])
+		if err != nil {
+			return &WriteResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to write single coil: %v", err),
+			}, nil
+		}
+
+	case 15: // Write Multiple Coils
+		err = client.WriteMultipleCoils(ctx, address, config.RegisterValues)
+		if err != nil {
+			return &WriteResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to write multiple coils: %v", err),
+			}, nil
+		}
+
+	case 6: // Write Single Register
+		if len(config.RegisterValues) != 1 {
+			return &WriteResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Write Single Register requires exactly 1 value, got %d", len(config.RegisterValues)),
+			}, nil
+		}
+		// Use WriteMultipleRegisters with quantity=1 for single register
+		err = client.WriteMultipleRegisters(ctx, address, config.RegisterValues)
+		if err != nil {
+			return &WriteResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to write single register: %v", err),
+			}, nil
+		}
+
+	case 16: // Write Multiple Registers
+		err = client.WriteMultipleRegisters(ctx, address, config.RegisterValues)
+		if err != nil {
+			return &WriteResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to write multiple registers: %v", err),
+			}, nil
+		}
+
+	default:
+		return &WriteResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Unsupported function code for write: %d", fc),
+		}, nil
+	}
+
+	// Log success message based on function code
+	switch fc {
+	case 5:
+		log.Infof("Test write successful (single coil): device=%d, slave=%d, address=%d",
+			config.DeviceID, config.SlaveID, config.RegisterAddress)
+	case 15:
+		log.Infof("Test write successful (multiple coils): device=%d, slave=%d, address=%d, quantity=%d",
+			config.DeviceID, config.SlaveID, config.RegisterAddress, config.Quantity)
+	case 6:
+		log.Infof("Test write successful (single register): device=%d, slave=%d, address=%d",
+			config.DeviceID, config.SlaveID, config.RegisterAddress)
+	case 16:
+		log.Infof("Test write successful (multiple registers): device=%d, slave=%d, address=%d, quantity=%d",
+			config.DeviceID, config.SlaveID, config.RegisterAddress, config.Quantity)
+	}
+
+	return &WriteResponse{
+		Success: true,
+		Message: "Test write successful (no parameter saved)",
+	}, nil
+}
+
 // Client interface for Modbus clients
 type Client interface {
 	Read(ctx context.Context, functionCode int, address uint16, quantity uint16) ([]byte, error)
 	WriteMultipleRegisters(ctx context.Context, address uint16, values []uint16) error
+	WriteMultipleCoils(ctx context.Context, address uint16, values []uint16) error
+	WriteSingleCoil(ctx context.Context, address uint16, value uint16) error
 	Close() error
 }
