@@ -97,9 +97,18 @@ func main() {
 		// Evaluate all formulas after loading (if dependencies are available)
 		// This ensures existing formula parameters appear in dashboard immediately
 		go func() {
-			// Wait a bit for raw parameters to be polled and cached
+			// Wait longer for raw parameters to be polled and cached
+			// Increased delay to ensure polling has occurred at least once
+			// Note: With sequential queue, first job executes immediately, subsequent jobs wait
+			// Wait for at least 2 polling cycles to ensure all raw parameters are polled
+			log.Info("[STARTUP] Waiting for raw parameters to be polled before evaluating formulas...")
+			time.Sleep(3 * time.Second) // Wait for first polling cycle (1000ms) + buffer
+			log.Info("[STARTUP] Evaluating all loaded formulas...")
+			formulaEngine.EvaluateAll()
+
+			// Also evaluate again after another cycle to catch any that failed first time
 			time.Sleep(2 * time.Second)
-			log.Info("Evaluating all loaded formulas...")
+			log.Info("[STARTUP] Re-evaluating formulas after second polling cycle...")
 			formulaEngine.EvaluateAll()
 		}()
 	}

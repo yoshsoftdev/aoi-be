@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -108,11 +109,16 @@ func (cq *ConnectionQueue) StartWorker() {
 	log.Infof("[QUEUE] Starting worker: connection_id=%d, connection_name=%s", cq.connectionID, cq.connectionName)
 
 	go func() {
+		jobCount := 0
 		for job := range cq.queue {
+			jobCount++
+			log.Infof("[QUEUE] Worker received job #%d: connection_id=%d, job_type=%s, config_id=%d, parameter_id=%d, slave_id=%d, queue_length=%d",
+				jobCount, cq.connectionID, job.Type, job.ConfigID, job.ParameterID, job.SlaveID, len(cq.queue))
+
 			// Check if connection is locked (test/write in progress)
 			if cq.IsLocked() && job.Type == JobTypePolling {
-				log.Debugf("[QUEUE] Skipping polling job (connection locked): connection_id=%d, config_id=%d",
-					cq.connectionID, job.ConfigID)
+				log.Warnf("[QUEUE] Skipping polling job (connection locked): connection_id=%d, config_id=%d, parameter_id=%d",
+					cq.connectionID, job.ConfigID, job.ParameterID)
 				continue
 			}
 
@@ -123,17 +129,28 @@ func (cq *ConnectionQueue) StartWorker() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			startTime := time.Now()
 
-			err := job.ExecuteFn(ctx)
+			// Execute job with panic recovery to ensure worker continues even if job panics
+			var err error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Errorf("[QUEUE] Job panicked: connection_id=%d, config_id=%d, parameter_id=%d, panic=%v",
+							cq.connectionID, job.ConfigID, job.ParameterID, r)
+						err = fmt.Errorf("job panicked: %v", r)
+					}
+				}()
+				err = job.ExecuteFn(ctx)
+			}()
 
 			duration := time.Since(startTime)
 			cancel()
 
 			if err != nil {
-				log.Warnf("[QUEUE] Job execution failed: connection_id=%d, job_type=%s, config_id=%d, error=%v, duration=%v",
-					cq.connectionID, job.Type, job.ConfigID, err, duration)
+				log.Warnf("[QUEUE] Job execution failed: connection_id=%d, job_type=%s, config_id=%d, parameter_id=%d, error=%v, duration=%v",
+					cq.connectionID, job.Type, job.ConfigID, job.ParameterID, err, duration)
 			} else {
-				log.Debugf("[QUEUE] Job execution completed: connection_id=%d, job_type=%s, config_id=%d, duration=%v",
-					cq.connectionID, job.Type, job.ConfigID, duration)
+				log.Infof("[QUEUE] Job execution completed successfully: connection_id=%d, job_type=%s, config_id=%d, parameter_id=%d, duration=%v",
+					cq.connectionID, job.Type, job.ConfigID, job.ParameterID, duration)
 			}
 		}
 
