@@ -3,9 +3,11 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"aoi-backend/internal/core/database"
+	"aoi-backend/internal/core/logger"
 	"aoi-backend/internal/domain"
 	"aoi-backend/internal/worker"
 
@@ -131,12 +133,18 @@ func (s *SchedulerManager) ScheduleModbusRTU(configID uint, pollingMs int) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := s.modbusRTUWorker.Execute(ctx, configID); err != nil {
-			fmt.Printf("Error executing Modbus RTU job %d: %v\n", configID, err)
+			// Use Debug level for timeout errors to reduce log spam
+			// Timeout is a normal condition when device is unavailable
+			if strings.Contains(err.Error(), "timeout") {
+				logger.GetLogger().Debugf("Modbus RTU job %d: %v", configID, err)
+			} else {
+				logger.GetLogger().Warnf("Error executing Modbus RTU job %d: %v", configID, err)
+			}
 		}
 	})
 
 	if err != nil {
-		fmt.Printf("Failed to schedule Modbus RTU job %d: %v\n", configID, err)
+		logger.GetLogger().Errorf("Failed to schedule Modbus RTU job %d: %v", configID, err)
 		return
 	}
 
@@ -159,12 +167,18 @@ func (s *SchedulerManager) ScheduleModbusTCP(configID uint, pollingMs int) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := s.modbusTCPWorker.Execute(ctx, configID); err != nil {
-			fmt.Printf("Error executing Modbus TCP job %d: %v\n", configID, err)
+			// Use Debug level for timeout errors to reduce log spam
+			// Timeout is a normal condition when device is unavailable
+			if strings.Contains(err.Error(), "timeout") {
+				logger.GetLogger().Debugf("Modbus TCP job %d: %v", configID, err)
+			} else {
+				logger.GetLogger().Warnf("Error executing Modbus TCP job %d: %v", configID, err)
+			}
 		}
 	})
 
 	if err != nil {
-		fmt.Printf("Failed to schedule Modbus TCP job %d: %v\n", configID, err)
+		logger.GetLogger().Errorf("Failed to schedule Modbus TCP job %d: %v", configID, err)
 		return
 	}
 
@@ -187,12 +201,18 @@ func (s *SchedulerManager) ScheduleSNMP(configID uint, pollingMs int) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := s.snmpWorker.Execute(ctx, configID); err != nil {
-			fmt.Printf("Error executing SNMP job %d: %v\n", configID, err)
+			// Use Debug level for timeout errors to reduce log spam
+			// Timeout is a normal condition when device is unavailable
+			if strings.Contains(err.Error(), "timeout") {
+				logger.GetLogger().Debugf("SNMP job %d: %v", configID, err)
+			} else {
+				logger.GetLogger().Warnf("Error executing SNMP job %d: %v", configID, err)
+			}
 		}
 	})
 
 	if err != nil {
-		fmt.Printf("Failed to schedule SNMP job %d: %v\n", configID, err)
+		logger.GetLogger().Errorf("Failed to schedule SNMP job %d: %v", configID, err)
 		return
 	}
 
@@ -230,21 +250,21 @@ func (s *SchedulerManager) TriggerImmediateExecution(parameterID uint, paramType
 		var modbusRTU domain.ModbusRTU
 		if err := s.db.Where("id_parameter = ?", parameterID).First(&modbusRTU).Error; err == nil {
 			if err := s.modbusRTUWorker.Execute(ctx, modbusRTU.ID); err != nil {
-				fmt.Printf("Failed to execute Modbus RTU for parameter %d: %v\n", parameterID, err)
+				logger.GetLogger().Warnf("Failed to execute Modbus RTU for parameter %d: %v", parameterID, err)
 			}
 		}
 	case "modbus_tcp":
 		var modbusTCP domain.ModbusTCP
 		if err := s.db.Where("id_parameter = ?", parameterID).First(&modbusTCP).Error; err == nil {
 			if err := s.modbusTCPWorker.Execute(ctx, modbusTCP.ID); err != nil {
-				fmt.Printf("Failed to execute Modbus TCP for parameter %d: %v\n", parameterID, err)
+				logger.GetLogger().Warnf("Failed to execute Modbus TCP for parameter %d: %v", parameterID, err)
 			}
 		}
 	case "snmp":
 		var snmpConfig domain.SNMPConfig
 		if err := s.db.Where("id_parameter = ?", parameterID).First(&snmpConfig).Error; err == nil {
 			if err := s.snmpWorker.Execute(ctx, snmpConfig.ID); err != nil {
-				fmt.Printf("Failed to execute SNMP for parameter %d: %v\n", parameterID, err)
+				logger.GetLogger().Warnf("Failed to execute SNMP for parameter %d: %v", parameterID, err)
 			}
 		}
 	}

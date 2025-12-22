@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"aoi-backend/internal/core/config"
+
 	"github.com/redis/go-redis/v9"
 )
 
@@ -28,6 +30,7 @@ type RedisCache struct {
 
 type InMemoryCache struct {
 	data map[string]string
+	mu   sync.RWMutex // Protects concurrent access to map
 }
 
 func Init() (Cache, error) {
@@ -88,13 +91,17 @@ func (m *InMemoryCache) Set(key string, value interface{}, ttl time.Duration) er
 	if err != nil {
 		return err
 	}
+	m.mu.Lock()
 	m.data[key] = string(data)
+	m.mu.Unlock()
 	// Note: In-memory cache doesn't support TTL, but it's fine for edge device
 	return nil
 }
 
 func (m *InMemoryCache) Get(key string, dest interface{}) error {
+	m.mu.RLock()
 	data, ok := m.data[key]
+	m.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("key not found: %s", key)
 	}
@@ -102,12 +109,15 @@ func (m *InMemoryCache) Get(key string, dest interface{}) error {
 }
 
 func (m *InMemoryCache) Delete(key string) error {
+	m.mu.Lock()
 	delete(m.data, key)
+	m.mu.Unlock()
 	return nil
 }
 
 func (m *InMemoryCache) Exists(key string) (bool, error) {
+	m.mu.RLock()
 	_, ok := m.data[key]
+	m.mu.RUnlock()
 	return ok, nil
 }
-

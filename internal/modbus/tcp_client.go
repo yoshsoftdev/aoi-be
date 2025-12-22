@@ -78,6 +78,9 @@ func (c *TCPClient) Read(ctx context.Context, functionCode int, address uint16, 
 		return nil, fmt.Errorf("failed to read Modbus: %w", err)
 	}
 
+	// Log response (data bytes only, not full frame for standard library)
+	LogResponseData("TCP", functionCode, address, quantity, result)
+
 	return result, nil
 }
 
@@ -119,6 +122,9 @@ func (c *TCPClient) WriteMultipleRegisters(ctx context.Context, address uint16, 
 		bytes[i*2] = byte(v >> 8)     // High byte
 		bytes[i*2+1] = byte(v & 0xFF) // Low byte
 	}
+
+	// Log write request (data bytes)
+	LogRequest("TCP", 16, address, uint16(len(values)), bytes)
 
 	_, err := c.client.WriteMultipleRegisters(address, uint16(len(values)), bytes)
 	if err != nil {

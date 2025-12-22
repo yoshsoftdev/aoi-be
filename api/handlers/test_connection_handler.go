@@ -22,6 +22,8 @@ type TestConnectionRequest struct {
 type TestConnectionResponse struct {
 	Connected bool        `json:"connected"`
 	RawValue  interface{} `json:"raw_value,omitempty"`
+	RawHex    string      `json:"raw_hex,omitempty"`   // Raw bytes in hex format
+	RawBytes  []int       `json:"raw_bytes,omitempty"` // Raw bytes as array of integers (0-255)
 	Message   string      `json:"message"`
 	Details   string      `json:"details,omitempty"`
 }
@@ -117,6 +119,34 @@ func (h *ModbusHandler) TestConnection(c *gin.Context) {
 		}
 		log.Debugf("TestConnection: Read succeeded, got %d bytes", len(data))
 
+		// Always return raw bytes in hex format and as array
+		rawHex := modbus.FormatHex(data)
+		rawBytes := make([]int, len(data))
+		for i, b := range data {
+			rawBytes[i] = int(b)
+		}
+
+		// Function code 1 (Read Coils) and 2 (Read Discrete Inputs) read BITS, not registers
+		// They return packed bits, not register values
+		if config.FunctionCode == 1 || config.FunctionCode == 2 {
+			// Unpack bits from response
+			bits := modbus.ConvertBitsToArray(data, config.Quantity)
+			// Convert to float64 array for JSON response
+			bitsArray := make([]float64, len(bits))
+			for i, bit := range bits {
+				bitsArray[i] = float64(bit)
+			}
+
+			response = TestConnectionResponse{
+				Connected: true,
+				RawValue:  bitsArray,
+				RawHex:    rawHex,
+				RawBytes:  rawBytes,
+				Message:   "Connection successful",
+			}
+			break
+		}
+
 		// Convert bytes to value berdasarkan data_type.
 		// Kalau konversi gagal, tetap Connected=true tapi dengan detail error.
 		dataType := config.DataType
@@ -132,6 +162,8 @@ func (h *ModbusHandler) TestConnection(c *gin.Context) {
 			if err != nil {
 				response = TestConnectionResponse{
 					Connected: true,
+					RawHex:    rawHex,
+					RawBytes:  rawBytes,
 					Message:   "Connection OK, conversion failed",
 					Details:   err.Error(),
 				}
@@ -180,6 +212,8 @@ func (h *ModbusHandler) TestConnection(c *gin.Context) {
 			if conversionErr != nil {
 				response = TestConnectionResponse{
 					Connected: true,
+					RawHex:    rawHex,
+					RawBytes:  rawBytes,
 					Message:   "Connection OK, conversion failed",
 					Details:   conversionErr.Error(),
 				}
@@ -245,6 +279,34 @@ func (h *ModbusHandler) TestConnection(c *gin.Context) {
 			break
 		}
 
+		// Always return raw bytes in hex format and as array
+		rawHex := modbus.FormatHex(data)
+		rawBytes := make([]int, len(data))
+		for i, b := range data {
+			rawBytes[i] = int(b)
+		}
+
+		// Function code 1 (Read Coils) and 2 (Read Discrete Inputs) read BITS, not registers
+		// They return packed bits, not register values
+		if config.FunctionCode == 1 || config.FunctionCode == 2 {
+			// Unpack bits from response
+			bits := modbus.ConvertBitsToArray(data, config.Quantity)
+			// Convert to float64 array for JSON response
+			bitsArray := make([]float64, len(bits))
+			for i, bit := range bits {
+				bitsArray[i] = float64(bit)
+			}
+
+			response = TestConnectionResponse{
+				Connected: true,
+				RawValue:  bitsArray,
+				RawHex:    rawHex,
+				RawBytes:  rawBytes,
+				Message:   "Connection successful",
+			}
+			break
+		}
+
 		// Convert bytes ke value; kalau gagal tetap Connected=true.
 		dataType := config.DataType
 		if dataType == "" {
@@ -259,6 +321,8 @@ func (h *ModbusHandler) TestConnection(c *gin.Context) {
 			if err != nil {
 				response = TestConnectionResponse{
 					Connected: true,
+					RawHex:    rawHex,
+					RawBytes:  rawBytes,
 					Message:   "Connection OK, conversion failed",
 					Details:   err.Error(),
 				}
@@ -307,6 +371,8 @@ func (h *ModbusHandler) TestConnection(c *gin.Context) {
 			if conversionErr != nil {
 				response = TestConnectionResponse{
 					Connected: true,
+					RawHex:    rawHex,
+					RawBytes:  rawBytes,
 					Message:   "Connection OK, conversion failed",
 					Details:   conversionErr.Error(),
 				}
@@ -318,6 +384,8 @@ func (h *ModbusHandler) TestConnection(c *gin.Context) {
 		response = TestConnectionResponse{
 			Connected: true,
 			RawValue:  rawValue,
+			RawHex:    rawHex,
+			RawBytes:  rawBytes,
 			Message:   "Connection successful",
 		}
 

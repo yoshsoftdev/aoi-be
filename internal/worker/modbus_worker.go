@@ -84,6 +84,10 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 		return err
 	}
 
+	// Log raw data received
+	logger.GetLogger().Debugf("Parameter %d (%s): Raw data received: %v (hex: %X), length: %d bytes",
+		config.IDParameter, param.Nama, data, data, len(data))
+
 	// Convert bytes to value based on data type
 	var rawValueFloat float64
 
@@ -99,6 +103,9 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 			dataType = "uint16" // Default to uint16 for single register
 		}
 	}
+
+	logger.GetLogger().Debugf("Parameter %d (%s): Using data_type=%s, byte_order=%s, quantity=%d, scaling=%.6f",
+		config.IDParameter, param.Nama, dataType, config.ByteOrder, config.Quantity, config.Scaling)
 
 	// Validate data_type and quantity compatibility
 	if (dataType == "float32" || dataType == "float") && config.Quantity < 2 {
@@ -119,6 +126,7 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 			return err
 		}
 		rawValueFloat = float64(rawFloat32)
+		logger.GetLogger().Debugf("Parameter %d (%s): Converted to float32: %.6f", config.IDParameter, param.Nama, rawFloat32)
 	case "float64":
 		rawFloat64, err := modbus.ConvertBytesToFloat64(data, config.ByteOrder, config.Quantity)
 		if err != nil {
@@ -126,6 +134,7 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 			return err
 		}
 		rawValueFloat = rawFloat64
+		logger.GetLogger().Debugf("Parameter %d (%s): Converted to float64: %.6f", config.IDParameter, param.Nama, rawFloat64)
 	case "int32":
 		rawInt32, err := modbus.ConvertBytesToSignedInt32(data, config.ByteOrder, config.Quantity)
 		if err != nil {
@@ -133,6 +142,7 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 			return err
 		}
 		rawValueFloat = float64(rawInt32)
+		logger.GetLogger().Debugf("Parameter %d (%s): Converted to int32: %d", config.IDParameter, param.Nama, rawInt32)
 	default: // uint16, uint32, or default
 		rawValue, err := modbus.ConvertBytesToValue(data, config.ByteOrder, config.Quantity)
 		if err != nil {
@@ -140,10 +150,15 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 			return err
 		}
 		rawValueFloat = float64(rawValue)
+		logger.GetLogger().Debugf("Parameter %d (%s): Converted to uint%d: %d (0x%X)",
+			config.IDParameter, param.Nama,
+			config.Quantity*16, rawValue, rawValue)
 	}
 
 	// Apply scaling factor
 	scaledValue := rawValueFloat * config.Scaling
+	logger.GetLogger().Debugf("Parameter %d (%s): Raw value: %.6f, Scaling: %.6f, Scaled value: %.6f",
+		config.IDParameter, param.Nama, rawValueFloat, config.Scaling, scaledValue)
 
 	// Evaluate formula if exists
 	var processedValue interface{} = scaledValue

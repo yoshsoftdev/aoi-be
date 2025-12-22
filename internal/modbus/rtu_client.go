@@ -104,6 +104,9 @@ func (c *RTUClient) Read(ctx context.Context, functionCode int, address uint16, 
 			return nil, fmt.Errorf("failed to read Modbus: %w", err)
 		}
 
+		// Log response (data bytes only, not full frame for standard library)
+		LogResponseData("RTU", functionCode, address, quantity, result)
+
 		log.Debugf("RTUClient.Read: Standard library read succeeded: %d bytes", len(result))
 		return result, nil
 	}
@@ -127,6 +130,9 @@ func (c *RTUClient) Read(ctx context.Context, functionCode int, address uint16, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to read Modbus: %w", err)
 	}
+
+	// Log response (data bytes only, not full frame for standard library)
+	LogResponseData("RTU", functionCode, address, quantity, result)
 
 	return result, nil
 }
@@ -211,6 +217,9 @@ func (c *RTUClient) readMultipleRegisters(ctx context.Context, functionCode int,
 	request[6] = byte(crc & 0xFF)
 	request[7] = byte(crc >> 8)
 
+	// Log request frame (hex)
+	LogRequest("RTU", functionCode, address, quantity, request)
+
 	// Send request
 	if _, err := writer.Write(request); err != nil {
 		return nil, fmt.Errorf("failed to write request: %w", err)
@@ -275,6 +284,9 @@ func (c *RTUClient) readMultipleRegisters(ctx context.Context, functionCode int,
 
 	// Extract data bytes (skip header and CRC)
 	data := fullResponse[3 : 3+byteCount]
+
+	// Log response frame (hex)
+	LogResponse("RTU", functionCode, address, quantity, fullResponse)
 
 	return data, nil
 }
@@ -351,6 +363,9 @@ func (c *RTUClient) WriteMultipleRegisters(ctx context.Context, address uint16, 
 		bytes[i*2] = byte(v >> 8)     // High byte
 		bytes[i*2+1] = byte(v & 0xFF) // Low byte
 	}
+
+	// Log write request (data bytes)
+	LogRequest("RTU", 16, address, uint16(len(values)), bytes)
 
 	_, err := c.client.WriteMultipleRegisters(address, uint16(len(values)), bytes)
 	if err != nil {

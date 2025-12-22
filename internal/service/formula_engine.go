@@ -5,6 +5,7 @@ import (
 	"math"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -202,16 +203,42 @@ func (e *FormulaEngine) evaluateFormula(formulaParamID uint, depth int) error {
 		values[v.Name] = f
 	}
 
+	// Log expression and values for debugging
+	logger.GetLogger().Debugf("Formula Engine: Evaluating formula for parameter %d", formulaParamID)
+	logger.GetLogger().Debugf("Formula Engine: Expression: '%s' (length: %d)", def.Expression, len(def.Expression))
+	logger.GetLogger().Debugf("Formula Engine: Variables: %+v", values)
+
+	// Trim whitespace from expression
+	expressionStr := strings.TrimSpace(def.Expression)
+	if expressionStr == "" {
+		return fmt.Errorf("expression is empty for parameter %d", formulaParamID)
+	}
+
 	// Evaluate expression using govaluate
-	expression, err := govaluate.NewEvaluableExpression(def.Expression)
+	expression, err := govaluate.NewEvaluableExpression(expressionStr)
 	if err != nil {
-		return fmt.Errorf("invalid expression: %w", err)
+		logger.GetLogger().Errorf("Formula Engine: Failed to parse expression '%s': %v", expressionStr, err)
+		return fmt.Errorf("invalid expression '%s': %w", expressionStr, err)
+	}
+
+	// Log which variables are required by the expression
+	parameters := expression.Vars()
+	logger.GetLogger().Debugf("Formula Engine: Expression requires variables: %v", parameters)
+
+	// Check if all required variables are provided
+	for _, param := range parameters {
+		if _, exists := values[param]; !exists {
+			logger.GetLogger().Warnf("Formula Engine: Variable '%s' required by expression but not provided. Available variables: %v", param, values)
+		}
 	}
 
 	result, err := expression.Evaluate(values)
 	if err != nil {
+		logger.GetLogger().Errorf("Formula Engine: Failed to evaluate expression '%s' with values %+v: %v", expressionStr, values, err)
 		return fmt.Errorf("failed to evaluate expression: %w", err)
 	}
+
+	logger.GetLogger().Debugf("Formula Engine: Evaluation result: %v (type: %T)", result, result)
 
 	// Convert result to float64
 	resultFloat, err := toFloat64(result)

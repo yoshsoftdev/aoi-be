@@ -23,6 +23,7 @@ import (
 func main() {
 	// Parse command line flags
 	devMode := flag.Bool("dev", false, "Enable development mode (Mac-compatible USB TTY paths)")
+	poofMode := flag.Bool("poof", false, "Disable polling (polling enabled by default)")
 	flag.Parse()
 
 	// Set dev flag in environment for config to read
@@ -164,9 +165,16 @@ func main() {
 		modbusTCPWorker,
 		snmpWorker,
 	)
-	// Start scheduler (polling enabled)
-	schedulerManager.Start()
-	log.Info("Scheduler started (polling enabled)")
+
+	// Control polling based on --poof flag
+	// If --poof flag is present, disable polling
+	// If --poof flag is NOT present, enable polling (default behavior)
+	if *poofMode {
+		log.Info("Scheduler initialized (polling disabled via --poof flag)")
+	} else {
+		schedulerManager.Start()
+		log.Info("Scheduler started (polling enabled)")
+	}
 
 	// Setup routes
 	router := routes.SetupRoutes(
