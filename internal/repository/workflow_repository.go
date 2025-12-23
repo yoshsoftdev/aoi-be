@@ -47,7 +47,51 @@ func (r *workflowRepository) Create(workflow *domain.Workflow) error {
 }
 
 func (r *workflowRepository) Update(workflow *domain.Workflow) error {
-	return database.GetDB().Save(workflow).Error
+	db := database.GetDB()
+
+	// Start transaction to ensure atomicity
+	return db.Transaction(func(tx *gorm.DB) error {
+		// Delete old conditions
+		if err := tx.Where("workflow_id = ?", workflow.ID).Delete(&domain.WorkflowCondition{}).Error; err != nil {
+			return err
+		}
+
+		// Delete old actions
+		if err := tx.Where("workflow_id = ?", workflow.ID).Delete(&domain.WorkflowAction{}).Error; err != nil {
+			return err
+		}
+
+		// Update workflow basic fields
+		if err := tx.Model(&domain.Workflow{}).Where("id = ?", workflow.ID).Updates(map[string]interface{}{
+			"nama":        workflow.Nama,
+			"description": workflow.Description,
+			"enabled":     workflow.Enabled,
+		}).Error; err != nil {
+			return err
+		}
+
+		// Create new conditions
+		if len(workflow.Conditions) > 0 {
+			for i := range workflow.Conditions {
+				workflow.Conditions[i].WorkflowID = workflow.ID
+			}
+			if err := tx.Create(&workflow.Conditions).Error; err != nil {
+				return err
+			}
+		}
+
+		// Create new actions
+		if len(workflow.Actions) > 0 {
+			for i := range workflow.Actions {
+				workflow.Actions[i].WorkflowID = workflow.ID
+			}
+			if err := tx.Create(&workflow.Actions).Error; err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
 }
 
 func (r *workflowRepository) Delete(id uint) error {
