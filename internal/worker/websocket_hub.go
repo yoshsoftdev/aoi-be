@@ -115,13 +115,27 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 	// Create DashboardData payload compatible with frontend
 	// Frontend expects: parameter_id, device_nama, parameter_nama, value, timestamp, status
 	// Convert timestamp to string format for JSON compatibility
+	// CRITICAL: Ensure value is never null - default to 0 if ProcessedValue is nil
+	var value interface{} = data.ProcessedValue
+	if value == nil {
+		value = float64(0)
+		log.Warnf("[BROADCAST] ProcessedValue is nil for parameter_id=%d, defaulting to 0", data.ParameterID)
+	}
+
+	// CRITICAL: Ensure status is never empty - default to "offline" if empty
+	status := data.Status
+	if status == "" {
+		status = "offline"
+		log.Warnf("[BROADCAST] Status is empty for parameter_id=%d, defaulting to 'offline'", data.ParameterID)
+	}
+
 	dashboardData := map[string]interface{}{
 		"parameter_id":   data.ParameterID,
 		"device_nama":    data.DeviceNama,                     // Device name
 		"parameter_nama": data.ParameterNama,                  // Logical parameter name (not raw naming)
-		"value":          data.ProcessedValue,                 // Final value only (after decode, scale, formula)
+		"value":          value,                               // Final value (never null, defaults to 0)
 		"timestamp":      data.Timestamp.Format(time.RFC3339), // Convert to RFC3339 string
-		"status":         data.Status,
+		"status":         status,                              // Status (never empty, defaults to "offline")
 	}
 
 	message := map[string]interface{}{

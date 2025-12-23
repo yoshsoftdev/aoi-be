@@ -210,24 +210,61 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) error {
 
 func (w *SNMPWorker) handleError(paramID uint, paramNama, paramType string, err error) {
 	errorMsg := err.Error()
+	log := logger.GetLogger()
 
 	// Get parameter and device for error message
 	param, paramErr := w.paramRepo.GetByID(paramID)
 	var deviceNama string
+	var paramMode string
 	if paramErr == nil {
 		device, deviceErr := w.deviceRepo.GetByID(param.DeviceID)
 		if deviceErr == nil {
 			deviceNama = device.Nama
 		}
+		paramMode = param.ParameterMode
+		if paramMode == "" {
+			paramMode = domain.ParameterModeDIRECT // Default for backward compatibility
+		}
 
-		// GUARD: Skip error broadcast for formula parameters
+		// GUARD: Skip error handling for formula parameters (handled by Formula Engine)
 		if param.IsFormula {
-			logger.GetLogger().Debugf("Skipping error broadcast for formula parameter %d", paramID)
+			log.Debugf("Skipping error broadcast for formula parameter %d", paramID)
 			return
 		}
+
+		// GUARD: Skip error handling for SOURCE parameters (internal only)
+		if paramMode == domain.ParameterModeSOURCE {
+			log.Debugf("Skipping error broadcast for SOURCE parameter %d", paramID)
+			return
+		}
+	} else {
+		// If we can't get parameter, default to DIRECT mode
+		paramMode = domain.ParameterModeDIRECT
 	}
 
-	realtimeData := domain.RealtimeData{
+	// CRITICAL: When device is offline, update clean cache with value=0 and status=OFFLINE
+	// This ensures parameter remains visible in dashboard
+	cleanData := domain.RealtimeData{
+		ParameterID:    paramID,
+		ParameterNama:  paramNama,
+		ParameterType:  paramType,
+		DeviceNama:     deviceNama,
+		RawValue:       nil,        // CLEAN data does NOT expose raw value
+		ProcessedValue: float64(0), // Force value to 0 when offline
+		CustomRumus: func() *string {
+			if paramErr == nil && param.Unit != nil {
+				return param.Unit
+			}
+			return nil
+		}(),
+		Timestamp: time.Now(),
+		Status:    "offline", // Status = OFFLINE (not "error")
+		Error:     nil,       // Don't expose error message in clean data
+	}
+
+	// Save RAW error state to internal cache
+	rawCacheKey := fmt.Sprintf("parameter:raw:%d", paramID)
+	rawErrorData := domain.RealtimeData{
 		ParameterID:   paramID,
 		ParameterNama: paramNama,
 		ParameterType: paramType,
@@ -236,11 +273,24 @@ func (w *SNMPWorker) handleError(paramID uint, paramNama, paramType string, err 
 		Status:        "error",
 		Error:         &errorMsg,
 	}
+	if err := w.cache.Set(rawCacheKey, rawErrorData, 24*time.Hour); err != nil {
+		log.Warnf("Failed to save raw error data to cache: %v", err)
+	}
 
-	// Cache error state (raw parameter only)
-	cacheKey := fmt.Sprintf("parameter:raw:%d", paramID)
-	w.cache.Set(cacheKey, realtimeData, 24*time.Hour)
+	// CRITICAL: Save CLEAN data with value=0 and status=OFFLINE to public cache
+	// This ensures parameter remains visible in dashboard
+	cleanCacheKey := fmt.Sprintf("parameter:clean:%d", paramID)
+	if err := w.cache.Set(cleanCacheKey, cleanData, 24*time.Hour); err != nil {
+		log.Warnf("Failed to save clean offline data to cache: %v", err)
+	} else {
+		log.Infof("[OFFLINE] parameter_id=%d, parameter_nama=%s, value=0, status=offline",
+			paramID, paramNama)
+	}
 
-	// DO NOT broadcast error - errors are handled by Formula Engine for formula parameters
-	// Raw parameter errors are internal only
+	// CRITICAL: Broadcast CLEAN data with value=0 and status=OFFLINE
+	// This ensures frontend receives update and parameter remains visible
+	if w.wsHub != nil {
+		log.Debugf("[BROADCAST] Broadcasting OFFLINE parameter: parameter_id=%d, value=0", paramID)
+		w.wsHub.BroadcastDataUpdate(cleanData)
+	}
 }
