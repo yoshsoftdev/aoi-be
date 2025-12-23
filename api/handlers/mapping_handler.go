@@ -40,22 +40,25 @@ type ConnectionData struct {
 }
 
 type MappingData struct {
-	Type       string `json:"type,omitempty"` // "raw" atau "formula" - jika tidak ada, auto-detect
+	OutputType string `json:"output_type"` // "DIRECT" atau "FORMULA" - REQUIRED, no auto-detect
 	OutputName string `json:"outputName"`
 
-	// Untuk RAW parameter
-	Formula         string `json:"formula,omitempty"` // Formula sederhana (value * 2) - bukan field reference
-	SlaveID         *int   `json:"slaveId,omitempty"`
-	FunctionCode    *int   `json:"functionCode,omitempty"`
-	RegisterAddress *int   `json:"registerAddress,omitempty"`
-	Quantity        *int   `json:"quantity,omitempty"`
-	DataType        string `json:"dataType,omitempty"`
-	ByteOrder       string `json:"byteOrder,omitempty"`
-	OID             string `json:"oid,omitempty"` // For SNMP
+	// Untuk DIRECT type
+	SourceField       string `json:"source_field,omitempty"`        // Source field name (e.g., "Slave 1 Addr 7")
+	SourceParameterID *uint  `json:"source_parameter_id,omitempty"` // Source parameter ID for DIRECT (single source only)
+	SlaveID           *int   `json:"slaveId,omitempty"`
+	FunctionCode      *int   `json:"functionCode,omitempty"`
+	RegisterAddress   *int   `json:"registerAddress,omitempty"`
+	Quantity          *int   `json:"quantity,omitempty"`
+	DataType          string `json:"dataType,omitempty"`
+	ByteOrder         string `json:"byteOrder,omitempty"`
+	OID               string `json:"oid,omitempty"` // For SNMP
 
-	// Untuk FORMULA parameter
-	Expression string            `json:"expression,omitempty"` // "a * 2" atau "(a + b) / 2"
-	Variables  []FormulaVariable `json:"variables,omitempty"`
+	// Untuk FORMULA type
+	Formula            string            `json:"formula,omitempty"`              // Formula expression like "(Slave 1 Addr 7 + Slave 1 Addr 8) / 10"
+	Expression         string            `json:"expression,omitempty"`           // Normalized expression "a * 2" atau "(a + b) / 2"
+	Variables          []FormulaVariable `json:"variables,omitempty"`            // Formula variables
+	SourceParameterIDs []uint            `json:"source_parameter_ids,omitempty"` // Multiple source parameter IDs for FORMULA
 }
 
 type FormulaVariable struct {
@@ -158,110 +161,220 @@ func (h *MappingHandler) Save(c *gin.Context) {
 
 	// Initialize repositories (if needed for future use)
 
-	// Step 1: Create RAW parameters first
+	// Step 1: Validate and separate mappings by output_type
 	// Mapping: parameter name → parameter_id (untuk reference oleh formula)
 	paramNameToID := make(map[string]uint)
 	var createdParams []domain.Parameter
+	var directMappings []MappingData
 	var formulaMappings []MappingData
+	var sourceMappings []MappingData // Dependencies for FORMULA (should be SOURCE)
 
-	// Phase 1: Create RAW parameters
+	// First pass: Identify which DIRECT mappings are dependencies for FORMULA
+	// Collect all parameter names that will be referenced by FORMULA
+	formulaDependencyNames := make(map[string]bool)
 	for _, mapping := range req.Mappings {
-		if isRawParameter(mapping, koneksiType) {
-			// Create raw parameter
-			param := &domain.Parameter{
-				DeviceID:  koneksi.ID,
-				Nama:      mapping.OutputName,
-				Type:      koneksiType,
-				ReadWrite: false,
-				IsFormula: false,
+		if mapping.OutputType == "FORMULA" {
+			// Extract parameter names from variables
+			for _, v := range mapping.Variables {
+				if v.SourceParameterName != "" {
+					formulaDependencyNames[v.SourceParameterName] = true
+					logger.GetLogger().Debugf("FORMULA '%s' depends on parameter '%s'", mapping.OutputName, v.SourceParameterName)
+				}
 			}
-
-			// Handle simple formula (value * 2) - bukan field reference
-			if mapping.Formula != "" && !containsFieldReference(mapping.Formula) {
-				param.CustomRumus = &mapping.Formula
-			}
-
-			if err := tx.Create(param).Error; err != nil {
-				tx.Rollback()
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"success": false,
-					"error":   "Failed to create raw parameter: " + err.Error(),
-				})
-				return
-			}
-
-			// Create protocol-specific config
-			if err := createProtocolConfig(tx, param, koneksiType, mapping, req.Connection.Config); err != nil {
-				tx.Rollback()
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"success": false,
-					"error":   "Failed to create protocol config: " + err.Error(),
-				})
-				return
-			}
-
-			// Store mapping for formula reference
-			paramNameToID[mapping.OutputName] = param.ID
-			createdParams = append(createdParams, *param)
-			logger.GetLogger().Infof("Created raw parameter: id=%d, name=%s", param.ID, param.Nama)
-		} else if isFormulaParameter(mapping) {
-			// Store for formula creation later
-			formulaMappings = append(formulaMappings, mapping)
-		} else {
-			// Unknown mapping type - skip or error?
-			logger.GetLogger().Warnf("Unknown mapping type for outputName=%s, skipping", mapping.OutputName)
 		}
+	}
+	logger.GetLogger().Infof("Found %d FORMULA dependencies: %v", len(formulaDependencyNames), formulaDependencyNames)
+
+	// Validate all mappings first
+	for _, mapping := range req.Mappings {
+		// Validate output_type is present and valid
+		if mapping.OutputType != "DIRECT" && mapping.OutputType != "FORMULA" {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error":   fmt.Sprintf("Invalid output_type '%s' for mapping '%s'. Must be 'DIRECT' or 'FORMULA'", mapping.OutputType, mapping.OutputName),
+			})
+			return
+		}
+
+		// Validate DIRECT type
+		if mapping.OutputType == "DIRECT" {
+			if mapping.SourceField == "" && mapping.SourceParameterID == nil {
+				tx.Rollback()
+				c.JSON(http.StatusBadRequest, gin.H{
+					"success": false,
+					"error":   fmt.Sprintf("DIRECT type requires source_field or source_parameter_id for mapping '%s'", mapping.OutputName),
+				})
+				return
+			}
+			// DIRECT cannot have formula
+			if mapping.Formula != "" {
+				tx.Rollback()
+				c.JSON(http.StatusBadRequest, gin.H{
+					"success": false,
+					"error":   fmt.Sprintf("DIRECT type cannot have formula for mapping '%s'", mapping.OutputName),
+				})
+				return
+			}
+
+			// Check if this DIRECT parameter is a dependency for FORMULA
+			if formulaDependencyNames[mapping.OutputName] {
+				// This is a SOURCE parameter (dependency for FORMULA)
+				sourceMappings = append(sourceMappings, mapping)
+				logger.GetLogger().Infof("DIRECT parameter '%s' is a FORMULA dependency → will be created as SOURCE", mapping.OutputName)
+			} else {
+				// This is a standalone DIRECT parameter
+				directMappings = append(directMappings, mapping)
+				logger.GetLogger().Infof("DIRECT parameter '%s' is standalone → will be created as DIRECT", mapping.OutputName)
+			}
+		}
+
+		// Validate FORMULA type
+		if mapping.OutputType == "FORMULA" {
+			if mapping.Formula == "" && mapping.Expression == "" {
+				tx.Rollback()
+				c.JSON(http.StatusBadRequest, gin.H{
+					"success": false,
+					"error":   fmt.Sprintf("FORMULA type requires formula or expression for mapping '%s'", mapping.OutputName),
+				})
+				return
+			}
+			formulaMappings = append(formulaMappings, mapping)
+		}
+	}
+
+	// Phase 1a: Create SOURCE parameters first (dependencies for FORMULA - internal only)
+	for _, mapping := range sourceMappings {
+		// Create SOURCE parameter (internal only, not broadcast)
+		param := &domain.Parameter{
+			DeviceID:      koneksi.ID,
+			Nama:          mapping.OutputName,
+			Type:          koneksiType,
+			ReadWrite:     false,
+			IsFormula:     false,
+			ParameterMode: domain.ParameterModeSOURCE, // SOURCE = polling device, internal only, tidak dibroadcast
+		}
+
+		if err := tx.Create(param).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error":   "Failed to create SOURCE parameter: " + err.Error(),
+			})
+			return
+		}
+
+		// Create protocol-specific config
+		if err := createProtocolConfig(tx, param, koneksiType, mapping, req.Connection.Config); err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error":   "Failed to create protocol config: " + err.Error(),
+			})
+			return
+		}
+
+		// Store mapping for formula reference
+		paramNameToID[mapping.OutputName] = param.ID
+		createdParams = append(createdParams, *param)
+		logger.GetLogger().Infof("Created SOURCE parameter (FORMULA dependency): id=%d, name=%s", param.ID, param.Nama)
+	}
+
+	// Phase 1b: Create DIRECT parameters (standalone, broadcast directly)
+	for _, mapping := range directMappings {
+		// Create DIRECT parameter
+		param := &domain.Parameter{
+			DeviceID:      koneksi.ID,
+			Nama:          mapping.OutputName,
+			Type:          koneksiType,
+			ReadWrite:     false,
+			IsFormula:     false,
+			ParameterMode: domain.ParameterModeDIRECT, // DIRECT = polling device, value already clean, broadcast directly
+		}
+
+		if err := tx.Create(param).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error":   "Failed to create DIRECT parameter: " + err.Error(),
+			})
+			return
+		}
+
+		// Create protocol-specific config
+		if err := createProtocolConfig(tx, param, koneksiType, mapping, req.Connection.Config); err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error":   "Failed to create protocol config: " + err.Error(),
+			})
+			return
+		}
+
+		// Store mapping for formula reference
+		paramNameToID[mapping.OutputName] = param.ID
+		createdParams = append(createdParams, *param)
+		logger.GetLogger().Infof("Created DIRECT parameter: id=%d, name=%s", param.ID, param.Nama)
 	}
 
 	// Phase 2: Create FORMULA parameters
 	for _, mapping := range formulaMappings {
-		// Validate formula mapping
-		if mapping.Expression == "" {
+		// Use expression if provided, otherwise use formula
+		expression := mapping.Expression
+		if expression == "" && mapping.Formula != "" {
+			// If expression is not provided but formula is, use formula as expression
+			// This handles cases where frontend sends formula but backend expects expression
+			expression = mapping.Formula
+		}
+
+		if expression == "" {
 			tx.Rollback()
 			c.JSON(http.StatusBadRequest, gin.H{
 				"success": false,
-				"error":   fmt.Sprintf("Expression is required for formula parameter '%s'", mapping.OutputName),
+				"error":   fmt.Sprintf("Expression or formula is required for FORMULA parameter '%s'", mapping.OutputName),
 			})
 			return
 		}
 
-		if len(mapping.Variables) == 0 {
-			tx.Rollback()
-			c.JSON(http.StatusBadRequest, gin.H{
-				"success": false,
-				"error":   fmt.Sprintf("Variables are required for formula parameter '%s'", mapping.OutputName),
-			})
-			return
-		}
+		// Variables are required if formula contains field references
+		// If variables are not provided, try to extract from formula
+		varMappings := make(map[string]uint)
+		if len(mapping.Variables) > 0 {
+			// Resolve variables to parameter IDs
+			var err error
+			varMappings, err = resolveVariables(tx, koneksi.ID, mapping.Variables, paramNameToID)
+			if err != nil {
+				tx.Rollback()
+				c.JSON(http.StatusBadRequest, gin.H{
+					"success": false,
+					"error":   fmt.Sprintf("Failed to resolve variables: %v", err),
+				})
+				return
+			}
 
-		// Resolve variables to parameter IDs
-		varMappings, err := resolveVariables(tx, koneksi.ID, mapping.Variables, paramNameToID)
-		if err != nil {
-			tx.Rollback()
-			c.JSON(http.StatusBadRequest, gin.H{
-				"success": false,
-				"error":   fmt.Sprintf("Failed to resolve variables: %v", err),
-			})
-			return
-		}
-
-		// Validate expression contains all variables
-		if err := validateExpression(mapping.Expression, varMappings); err != nil {
-			tx.Rollback()
-			c.JSON(http.StatusBadRequest, gin.H{
-				"success": false,
-				"error":   fmt.Sprintf("Invalid expression: %v", err),
-			})
-			return
+			// Validate expression contains all variables
+			if err := validateExpression(expression, varMappings); err != nil {
+				tx.Rollback()
+				c.JSON(http.StatusBadRequest, gin.H{
+					"success": false,
+					"error":   fmt.Sprintf("Invalid expression: %v", err),
+				})
+				return
+			}
+		} else {
+			// No variables provided - might be a simple formula without field references
+			// This is allowed for backward compatibility
+			logger.GetLogger().Warnf("FORMULA parameter '%s' has no variables - using expression as-is", mapping.OutputName)
 		}
 
 		// Create formula parameter
 		param := &domain.Parameter{
-			DeviceID:  koneksi.ID,
-			Nama:      mapping.OutputName,
-			Type:      "formula",
-			ReadWrite: false,
-			IsFormula: true,
+			DeviceID:      koneksi.ID,
+			Nama:          mapping.OutputName,
+			Type:          "formula",
+			ReadWrite:     false,
+			IsFormula:     true,
+			ParameterMode: domain.ParameterModeFORMULA, // FORMULA = derived parameter, not polling, broadcast
 		}
 
 		if err := tx.Create(param).Error; err != nil {
@@ -276,7 +389,7 @@ func (h *MappingHandler) Save(c *gin.Context) {
 		// Create parameter_formula
 		formula := &domain.ParameterFormula{
 			ParameterID:    param.ID,
-			Expression:     mapping.Expression, // Sudah normalized: "a * 2"
+			Expression:     expression, // Normalized expression: "a * 2" or raw formula
 			ExpressionType: "math",
 		}
 
@@ -289,7 +402,7 @@ func (h *MappingHandler) Save(c *gin.Context) {
 			return
 		}
 
-		// Create parameter_formula_var entries
+		// Create parameter_formula_var entries (if variables exist)
 		for varName, sourceParamID := range varMappings {
 			formulaVar := &domain.ParameterFormulaVar{
 				FormulaID:         formula.ID,
@@ -308,7 +421,7 @@ func (h *MappingHandler) Save(c *gin.Context) {
 		}
 
 		createdParams = append(createdParams, *param)
-		logger.GetLogger().Infof("Created formula parameter: id=%d, name=%s, expression=%s", param.ID, param.Nama, mapping.Expression)
+		logger.GetLogger().Infof("Created FORMULA parameter: id=%d, name=%s, expression=%s", param.ID, param.Nama, expression)
 	}
 
 	// Commit transaction
@@ -597,49 +710,9 @@ func createProtocolConfig(tx *gorm.DB, param *domain.Parameter, paramType string
 	return nil
 }
 
-// isRawParameter checks if mapping is a raw parameter
-// Raw parameter has Modbus/SNMP config (slaveId, registerAddress, or oid)
-func isRawParameter(mapping MappingData, koneksiType string) bool {
-	// Explicit type
-	if mapping.Type == "raw" {
-		return true
-	}
-
-	// Has Modbus config
-	if (koneksiType == "modbus_tcp" || koneksiType == "modbus_rtu") &&
-		mapping.SlaveID != nil && mapping.RegisterAddress != nil {
-		return true
-	}
-
-	// Has SNMP config
-	if koneksiType == "snmp" && mapping.OID != "" {
-		return true
-	}
-
-	// Has formula but NOT expression+variables (legacy simple formula)
-	if mapping.Formula != "" && mapping.Expression == "" && len(mapping.Variables) == 0 {
-		// Check if it's a simple formula (value * 2) not field reference
-		return !containsFieldReference(mapping.Formula)
-	}
-
-	return false
-}
-
-// isFormulaParameter checks if mapping is a formula parameter
-// Formula parameter has expression and variables
-func isFormulaParameter(mapping MappingData) bool {
-	// Explicit type
-	if mapping.Type == "formula" {
-		return true
-	}
-
-	// Has expression and variables
-	if mapping.Expression != "" && len(mapping.Variables) > 0 {
-		return true
-	}
-
-	return false
-}
+// NOTE: isRawParameter and isFormulaParameter functions are DEPRECATED
+// They are replaced by explicit output_type validation in Save handler
+// These functions are kept for backward compatibility but should not be used
 
 // containsFieldReference checks if formula contains field references like "Slave X Addr Y"
 // This is used to detect legacy format that should not be used anymore

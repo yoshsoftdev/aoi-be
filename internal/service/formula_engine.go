@@ -233,13 +233,15 @@ func (e *FormulaEngine) EvaluateAll() {
 			paramID, def.Expression, len(def.Variables))
 
 		// Check if dependencies are available
+		// CLEAN derive from SOURCE, FORMULA derive from CLEAN or SOURCE
 		missingDeps := make([]uint, 0)
 		for _, v := range def.Variables {
 			var rt domain.RealtimeData
-			cacheKey := fmt.Sprintf("parameter:raw:%d", v.SourceParameterID)
-			if err := e.cache.Get(cacheKey, &rt); err != nil {
-				outputCacheKey := fmt.Sprintf("parameter:out:%d", v.SourceParameterID)
-				if err2 := e.cache.Get(outputCacheKey, &rt); err2 != nil {
+			cleanCacheKey := fmt.Sprintf("parameter:clean:%d", v.SourceParameterID)
+			if err := e.cache.Get(cleanCacheKey, &rt); err != nil {
+				// Fallback: try RAW cache (for SOURCE parameters)
+				rawCacheKey := fmt.Sprintf("parameter:raw:%d", v.SourceParameterID)
+				if err2 := e.cache.Get(rawCacheKey, &rt); err2 != nil {
 					missingDeps = append(missingDeps, v.SourceParameterID)
 				}
 			}
@@ -304,6 +306,14 @@ func (e *FormulaEngine) OnRawParameterUpdated(sourceParamID uint, data *domain.R
 	log.Infof("[FORMULA] Evaluated %d/%d formulas successfully after raw parameter %d update", successCount, len(dependantFormulaParamIDs), sourceParamID)
 }
 
+// IsParameterUsedByFormula checks if a parameter is used as source by any formula
+func (e *FormulaEngine) IsParameterUsedByFormula(paramID uint) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	dependants := e.dependants[paramID]
+	return len(dependants) > 0
+}
+
 // evaluateFormula evaluates a formula and updates cache + broadcasts WebSocket
 // depth is used to prevent infinite loops in dependency chains
 func (e *FormulaEngine) evaluateFormula(formulaParamID uint, depth int) error {
@@ -320,17 +330,20 @@ func (e *FormulaEngine) evaluateFormula(formulaParamID uint, depth int) error {
 	}
 
 	// Prepare variable values from cache
-	// Read from RAW cache (parameter:raw:{id}) - raw parameters are stored there
+	// CLEAN derive from SOURCE (parameter:raw)
+	// FORMULA derive from CLEAN (parameter:clean) or SOURCE (parameter:raw)
 	values := make(map[string]interface{})
 	for _, v := range def.Variables {
-		// Get value from RAW cache
 		var rt domain.RealtimeData
-		cacheKey := fmt.Sprintf("parameter:raw:%d", v.SourceParameterID)
-		if err := e.cache.Get(cacheKey, &rt); err != nil {
-			// Fallback: try output cache (in case source is another formula)
-			outputCacheKey := fmt.Sprintf("parameter:out:%d", v.SourceParameterID)
-			if err2 := e.cache.Get(outputCacheKey, &rt); err2 != nil {
-				return fmt.Errorf("missing source parameter %d in cache (tried raw and output): %w", v.SourceParameterID, err)
+		var err error
+
+		// Try CLEAN cache first (for CLEAN parameters or DIRECT parameters)
+		cleanCacheKey := fmt.Sprintf("parameter:clean:%d", v.SourceParameterID)
+		if err = e.cache.Get(cleanCacheKey, &rt); err != nil {
+			// Fallback: try RAW cache (for SOURCE parameters)
+			rawCacheKey := fmt.Sprintf("parameter:raw:%d", v.SourceParameterID)
+			if err2 := e.cache.Get(rawCacheKey, &rt); err2 != nil {
+				return fmt.Errorf("missing source parameter %d in cache (tried clean and raw): %w", v.SourceParameterID, err)
 			}
 		}
 
@@ -430,16 +443,20 @@ func (e *FormulaEngine) evaluateFormula(formulaParamID uint, depth int) error {
 		CustomRumus:    param.Unit, // Temporary: use CustomRumus to pass unit to WebSocketHub
 	}
 
-	// Save OUTPUT to cache with output key (for formula results)
-	cacheKey := fmt.Sprintf("parameter:out:%d", formulaParamID)
-	if err := e.cache.Set(cacheKey, formulaData, 24*time.Hour); err != nil {
-		logger.GetLogger().Warnf("Failed to cache formula result: %v", err)
+	// Save CLEAN data to public cache (for FORMULA results)
+	// FORMULA results are CLEAN data (no raw value)
+	cleanCacheKey := fmt.Sprintf("parameter:clean:%d", formulaParamID)
+	if err := e.cache.Set(cleanCacheKey, formulaData, 24*time.Hour); err != nil {
+		logger.GetLogger().Warnf("Failed to cache formula clean data: %v", err)
+	} else {
+		logger.GetLogger().Infof("[CLEAN EMIT] parameter_id=%d, parameter_nama=%s, expression=%s, clean_value=%v",
+			formulaParamID, param.Nama, def.Expression, resultFloat)
 	}
 
 	// Broadcast CLEAN DATA via WebSocket
-	// Only formula parameters are broadcast - raw parameters are internal only
+	// FORMULA parameters are broadcast (they are CLEAN data)
 	if e.wsBroadcaster != nil {
-		logger.GetLogger().Infof("[FORMULA] Broadcasting clean data: parameter_id=%d, parameter_nama=%s, expression=%s, result=%v, device_nama=%s",
+		logger.GetLogger().Infof("[BROADCAST] Broadcasting FORMULA clean data: parameter_id=%d, parameter_nama=%s, expression=%s, result=%v, device_nama=%s",
 			formulaParamID, param.Nama, def.Expression, resultFloat, deviceNama)
 		e.wsBroadcaster.BroadcastDataUpdate(formulaData)
 	} else {

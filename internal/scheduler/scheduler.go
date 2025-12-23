@@ -130,11 +130,15 @@ func (s *SchedulerManager) loadAndScheduleAll() {
 	// Collect all polling jobs
 	var pollingJobs []PollingJob
 
-	// Load Modbus RTU with Parameter and Device - ONLY READ parameters
+	// Load Modbus RTU with Parameter and Device
+	// CRITICAL: Only poll SOURCE & DIRECT parameters (not CLEAN, not FORMULA)
+	// SOURCE = polling device, internal only
+	// DIRECT = polling device, nilai sudah clean, dibroadcast
 	var modbusRTUConfigs []domain.ModbusRTU
 	result := s.db.Preload("Parameter.Device").
 		Joins("JOIN parameters ON parameters.id = modbus_rtu.id_parameter").
 		Where("parameters.direction = ? OR (parameters.direction = '' AND parameters.read_write = 0)", "READ").
+		Where("(parameters.parameter_mode = ? OR parameters.parameter_mode = ? OR (parameters.parameter_mode = '' OR parameters.parameter_mode IS NULL))", domain.ParameterModeSOURCE, domain.ParameterModeDIRECT).
 		Find(&modbusRTUConfigs)
 
 	log.Infof("[SCHEDULER] ===== QUERY RESULT: Modbus RTU READ Configs =====")
@@ -142,12 +146,24 @@ func (s *SchedulerManager) loadAndScheduleAll() {
 	log.Infof("[SCHEDULER] Total configs found: %d", len(modbusRTUConfigs))
 
 	for idx, config := range modbusRTUConfigs {
-		log.Infof("[SCHEDULER]   [%d] Config ID: %d, Parameter ID: %d, Parameter Name: %s, Direction: %s, Device ID: %d, Slave ID: %d",
-			idx+1, config.ID, config.IDParameter, config.Parameter.Nama, config.Parameter.Direction, config.Parameter.DeviceID, config.SlaveID)
+		// Default to SOURCE if parameter_mode is empty/null (backward compatibility)
+		paramMode := config.Parameter.ParameterMode
+		if paramMode == "" {
+			paramMode = domain.ParameterModeSOURCE
+		}
 
-		// Double-check: skip if direction is WRITE
+		log.Infof("[SCHEDULER]   [%d] Config ID: %d, Parameter ID: %d, Parameter Name: %s, Direction: %s, Mode: %s, Device ID: %d, Slave ID: %d",
+			idx+1, config.ID, config.IDParameter, config.Parameter.Nama, config.Parameter.Direction, paramMode, config.Parameter.DeviceID, config.SlaveID)
+
+		// GUARD: Skip WRITE parameters
 		if config.Parameter.Direction == "WRITE" {
 			log.Warnf("[SCHEDULER]   [%d] ⚠️  Skipping WRITE parameter: Config ID=%d, Parameter ID=%d", idx+1, config.ID, config.IDParameter)
+			continue
+		}
+
+		// GUARD: Only poll SOURCE & DIRECT (skip CLEAN & FORMULA)
+		if paramMode != domain.ParameterModeSOURCE && paramMode != domain.ParameterModeDIRECT {
+			log.Warnf("[SCHEDULER]   [%d] ⚠️  Skipping non-pollable parameter (Mode=%s): Config ID=%d, Parameter ID=%d. Only SOURCE and DIRECT are polled.", idx+1, paramMode, config.ID, config.IDParameter)
 			continue
 		}
 
@@ -177,16 +193,31 @@ func (s *SchedulerManager) loadAndScheduleAll() {
 	log.Infof("[SCHEDULER] ===== END QUERY RESULT: Modbus RTU =====")
 	log.Infof("[SCHEDULER] Total pollingJobs after Modbus RTU: %d", len(pollingJobs))
 
-	// Load Modbus TCP with Parameter and Device - ONLY READ parameters
+	// Load Modbus TCP with Parameter and Device
+	// CRITICAL: Only poll SOURCE & DIRECT parameters (not CLEAN, not FORMULA)
 	var modbusTCPConfigs []domain.ModbusTCP
 	s.db.Preload("Parameter.Device").
 		Joins("JOIN parameters ON parameters.id = modbus_tcp.id_parameter").
 		Where("parameters.direction = ? OR (parameters.direction = '' AND parameters.read_write = 0)", "READ").
+		Where("(parameters.parameter_mode = ? OR parameters.parameter_mode = ? OR (parameters.parameter_mode = '' OR parameters.parameter_mode IS NULL))", domain.ParameterModeSOURCE, domain.ParameterModeDIRECT).
 		Find(&modbusTCPConfigs)
 
 	for _, config := range modbusTCPConfigs {
-		// Double-check: skip if direction is WRITE
+		// Default to SOURCE if parameter_mode is empty/null
+		paramMode := config.Parameter.ParameterMode
+		if paramMode == "" {
+			paramMode = domain.ParameterModeSOURCE
+		}
+
+		// GUARD: Skip WRITE parameters
 		if config.Parameter.Direction == "WRITE" {
+			log.Warnf("[SCHEDULER] ⚠️  Skipping WRITE parameter: Config ID=%d, Parameter ID=%d", config.ID, config.IDParameter)
+			continue
+		}
+
+		// GUARD: Only poll SOURCE & DIRECT
+		if paramMode != domain.ParameterModeSOURCE && paramMode != domain.ParameterModeDIRECT {
+			log.Warnf("[SCHEDULER] ⚠️  Skipping non-pollable parameter (Mode=%s): Config ID=%d, Parameter ID=%d", paramMode, config.ID, config.IDParameter)
 			continue
 		}
 		pollingMs := s.getPollingMs(config.PollingMs, &config.Parameter)
@@ -207,16 +238,31 @@ func (s *SchedulerManager) loadAndScheduleAll() {
 		}
 	}
 
-	// Load SNMP Config with Parameter and Device - ONLY READ parameters
+	// Load SNMP Config with Parameter and Device
+	// CRITICAL: Only poll SOURCE & DIRECT parameters (not CLEAN, not FORMULA)
 	var snmpConfigs []domain.SNMPConfig
 	s.db.Preload("Parameter.Device").
 		Joins("JOIN parameters ON parameters.id = snmp_config.id_parameter").
 		Where("parameters.direction = ? OR (parameters.direction = '' AND parameters.read_write = 0)", "READ").
+		Where("(parameters.parameter_mode = ? OR parameters.parameter_mode = ? OR (parameters.parameter_mode = '' OR parameters.parameter_mode IS NULL))", domain.ParameterModeSOURCE, domain.ParameterModeDIRECT).
 		Find(&snmpConfigs)
 
 	for _, config := range snmpConfigs {
-		// Double-check: skip if direction is WRITE
+		// Default to SOURCE if parameter_mode is empty/null
+		paramMode := config.Parameter.ParameterMode
+		if paramMode == "" {
+			paramMode = domain.ParameterModeSOURCE
+		}
+
+		// GUARD: Skip WRITE parameters
 		if config.Parameter.Direction == "WRITE" {
+			log.Warnf("[SCHEDULER] ⚠️  Skipping WRITE parameter: Config ID=%d, Parameter ID=%d", config.ID, config.IDParameter)
+			continue
+		}
+
+		// GUARD: Only poll SOURCE & DIRECT
+		if paramMode != domain.ParameterModeSOURCE && paramMode != domain.ParameterModeDIRECT {
+			log.Warnf("[SCHEDULER] ⚠️  Skipping non-pollable parameter (Mode=%s): Config ID=%d, Parameter ID=%d", paramMode, config.ID, config.IDParameter)
 			continue
 		}
 		pollingMs := s.getPollingMs(&config.PollingMs, &config.Parameter)

@@ -118,68 +118,93 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 	// Convert bytes to value based on data type
 	var rawValueFloat float64
 
-	// Determine data type (default to uint16 if not specified)
-	dataType := config.DataType
-	if dataType == "" {
-		// Auto-detect based on quantity
-		if config.Quantity >= 4 {
-			dataType = "float64" // Default to float64 for 4+ registers
-		} else if config.Quantity >= 2 {
-			dataType = "uint32" // Default to uint32 for 2 registers (safer than float32)
+	// Handle Function Code 1 (Read Coils) and Function Code 2 (Read Discrete Inputs)
+	// These return bit-packed data (1 byte can contain 8 bits), not register format (2 bytes per register)
+	if config.FunctionCode == 1 || config.FunctionCode == 2 {
+		// Convert bit-packed data to array of bits
+		bits := modbus.ConvertBitsToArray(data, config.Quantity)
+		if len(bits) == 0 {
+			err := fmt.Errorf("no bits extracted from FC%d response: data=%v, quantity=%d", config.FunctionCode, data, config.Quantity)
+			w.handleError(config.IDParameter, param.Nama, param.Type, err)
+			return err
+		}
+		// Use the first bit value (or sum if quantity > 1)
+		if config.Quantity == 1 {
+			rawValueFloat = float64(bits[0])
 		} else {
-			dataType = "uint16" // Default to uint16 for single register
+			// For multiple coils/discrete inputs, sum them or use first value
+			// Most common use case: quantity=1, so use first value
+			rawValueFloat = float64(bits[0])
+			logger.GetLogger().Debugf("Parameter %d (%s): FC%d read %d bits, using first bit value: %d",
+				config.IDParameter, param.Nama, config.FunctionCode, len(bits), bits[0])
 		}
-	}
+		logger.GetLogger().Debugf("Parameter %d (%s): Converted FC%d bits to value: %.0f (bits: %v)",
+			config.IDParameter, param.Nama, config.FunctionCode, rawValueFloat, bits)
+	} else {
+		// Handle register-based function codes (FC3, FC4, etc.)
+		// Determine data type (default to uint16 if not specified)
+		dataType := config.DataType
+		if dataType == "" {
+			// Auto-detect based on quantity
+			if config.Quantity >= 4 {
+				dataType = "float64" // Default to float64 for 4+ registers
+			} else if config.Quantity >= 2 {
+				dataType = "uint32" // Default to uint32 for 2 registers (safer than float32)
+			} else {
+				dataType = "uint16" // Default to uint16 for single register
+			}
+		}
 
-	logger.GetLogger().Debugf("Parameter %d (%s): Using data_type=%s, byte_order=%s, quantity=%d, scaling=%.6f",
-		config.IDParameter, param.Nama, dataType, config.ByteOrder, config.Quantity, config.Scaling)
+		logger.GetLogger().Debugf("Parameter %d (%s): Using data_type=%s, byte_order=%s, quantity=%d, scaling=%.6f",
+			config.IDParameter, param.Nama, dataType, config.ByteOrder, config.Quantity, config.Scaling)
 
-	// Validate data_type and quantity compatibility
-	if (dataType == "float32" || dataType == "float") && config.Quantity < 2 {
-		logger.GetLogger().Warnf("Parameter %d: data_type is %s but quantity is %d, adjusting quantity to 2", config.IDParameter, dataType, config.Quantity)
-		// Note: We can't change config.Quantity here, but we'll use what we have
-		// The converter will return an error which will be handled
-	} else if dataType == "float64" && config.Quantity < 4 {
-		logger.GetLogger().Warnf("Parameter %d: data_type is float64 but quantity is %d, adjusting quantity to 4", config.IDParameter, config.Quantity)
-	} else if dataType == "int32" && config.Quantity < 2 {
-		logger.GetLogger().Warnf("Parameter %d: data_type is int32 but quantity is %d, adjusting quantity to 2", config.IDParameter, config.Quantity)
-	}
+		// Validate data_type and quantity compatibility
+		if (dataType == "float32" || dataType == "float") && config.Quantity < 2 {
+			logger.GetLogger().Warnf("Parameter %d: data_type is %s but quantity is %d, adjusting quantity to 2", config.IDParameter, dataType, config.Quantity)
+			// Note: We can't change config.Quantity here, but we'll use what we have
+			// The converter will return an error which will be handled
+		} else if dataType == "float64" && config.Quantity < 4 {
+			logger.GetLogger().Warnf("Parameter %d: data_type is float64 but quantity is %d, adjusting quantity to 4", config.IDParameter, config.Quantity)
+		} else if dataType == "int32" && config.Quantity < 2 {
+			logger.GetLogger().Warnf("Parameter %d: data_type is int32 but quantity is %d, adjusting quantity to 2", config.IDParameter, config.Quantity)
+		}
 
-	switch dataType {
-	case "float32", "float": // Support both "float32" and "float" (alias)
-		rawFloat32, err := modbus.ConvertBytesToFloat32(data, config.ByteOrder, config.Quantity)
-		if err != nil {
-			w.handleError(config.IDParameter, param.Nama, param.Type, err)
-			return err
+		switch dataType {
+		case "float32", "float": // Support both "float32" and "float" (alias)
+			rawFloat32, err := modbus.ConvertBytesToFloat32(data, config.ByteOrder, config.Quantity)
+			if err != nil {
+				w.handleError(config.IDParameter, param.Nama, param.Type, err)
+				return err
+			}
+			rawValueFloat = float64(rawFloat32)
+			logger.GetLogger().Debugf("Parameter %d (%s): Converted to float32: %.6f", config.IDParameter, param.Nama, rawFloat32)
+		case "float64":
+			rawFloat64, err := modbus.ConvertBytesToFloat64(data, config.ByteOrder, config.Quantity)
+			if err != nil {
+				w.handleError(config.IDParameter, param.Nama, param.Type, err)
+				return err
+			}
+			rawValueFloat = rawFloat64
+			logger.GetLogger().Debugf("Parameter %d (%s): Converted to float64: %.6f", config.IDParameter, param.Nama, rawFloat64)
+		case "int32":
+			rawInt32, err := modbus.ConvertBytesToSignedInt32(data, config.ByteOrder, config.Quantity)
+			if err != nil {
+				w.handleError(config.IDParameter, param.Nama, param.Type, err)
+				return err
+			}
+			rawValueFloat = float64(rawInt32)
+			logger.GetLogger().Debugf("Parameter %d (%s): Converted to int32: %d", config.IDParameter, param.Nama, rawInt32)
+		default: // uint16, uint32, or default
+			rawValue, err := modbus.ConvertBytesToValue(data, config.ByteOrder, config.Quantity)
+			if err != nil {
+				w.handleError(config.IDParameter, param.Nama, param.Type, err)
+				return err
+			}
+			rawValueFloat = float64(rawValue)
+			logger.GetLogger().Debugf("Parameter %d (%s): Converted to uint%d: %d (0x%X)",
+				config.IDParameter, param.Nama,
+				config.Quantity*16, rawValue, rawValue)
 		}
-		rawValueFloat = float64(rawFloat32)
-		logger.GetLogger().Debugf("Parameter %d (%s): Converted to float32: %.6f", config.IDParameter, param.Nama, rawFloat32)
-	case "float64":
-		rawFloat64, err := modbus.ConvertBytesToFloat64(data, config.ByteOrder, config.Quantity)
-		if err != nil {
-			w.handleError(config.IDParameter, param.Nama, param.Type, err)
-			return err
-		}
-		rawValueFloat = rawFloat64
-		logger.GetLogger().Debugf("Parameter %d (%s): Converted to float64: %.6f", config.IDParameter, param.Nama, rawFloat64)
-	case "int32":
-		rawInt32, err := modbus.ConvertBytesToSignedInt32(data, config.ByteOrder, config.Quantity)
-		if err != nil {
-			w.handleError(config.IDParameter, param.Nama, param.Type, err)
-			return err
-		}
-		rawValueFloat = float64(rawInt32)
-		logger.GetLogger().Debugf("Parameter %d (%s): Converted to int32: %d", config.IDParameter, param.Nama, rawInt32)
-	default: // uint16, uint32, or default
-		rawValue, err := modbus.ConvertBytesToValue(data, config.ByteOrder, config.Quantity)
-		if err != nil {
-			w.handleError(config.IDParameter, param.Nama, param.Type, err)
-			return err
-		}
-		rawValueFloat = float64(rawValue)
-		logger.GetLogger().Debugf("Parameter %d (%s): Converted to uint%d: %d (0x%X)",
-			config.IDParameter, param.Nama,
-			config.Quantity*16, rawValue, rawValue)
 	}
 
 	// Apply scaling factor
@@ -212,10 +237,23 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 		}
 	}
 
-	// GUARD: Skip if this is a formula parameter (not raw)
-	// Formula parameters are handled by Formula Engine, not workers
-	if param.IsFormula {
-		logger.GetLogger().Debugf("Skipping formula parameter %d in worker - handled by Formula Engine", config.IDParameter)
+	// Determine parameter mode (default to DIRECT for backward compatibility)
+	// DIRECT = broadcast langsung, SOURCE = internal only
+	// Untuk backward compatibility: parameter yang sudah ada tanpa mode eksplisit
+	// akan muncul di dashboard (DIRECT), bukan hidden (SOURCE)
+	paramMode := param.ParameterMode
+	if paramMode == "" {
+		paramMode = domain.ParameterModeDIRECT
+	}
+
+	// CRITICAL: SOURCE parameters are NEVER broadcast, even if not used by formula
+	// SOURCE is explicitly set by user/system and should remain SOURCE
+	// Only DIRECT, CLEAN, and FORMULA should appear in dashboard
+
+	// GUARD: Only process SOURCE & DIRECT parameters here
+	// CLEAN & FORMULA are handled by Formula Engine, not workers
+	if paramMode != domain.ParameterModeSOURCE && paramMode != domain.ParameterModeDIRECT {
+		logger.GetLogger().Debugf("Skipping non-pollable parameter %d (Mode=%s) - handled by Formula Engine", config.IDParameter, paramMode)
 		return nil
 	}
 
@@ -233,23 +271,69 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 		Error:          nil,
 	}
 
-	// Save RAW data to cache with raw key (internal use only)
-	// This will NOT be broadcast to frontend
-	cacheKey := fmt.Sprintf("parameter:raw:%d", config.IDParameter)
-	if err := w.cache.Set(cacheKey, realtimeData, 24*time.Hour); err != nil {
+	// ============================================
+	// STEP 1: Save RAW data to internal cache (for SOURCE & DIRECT)
+	// ============================================
+	rawCacheKey := fmt.Sprintf("parameter:raw:%d", config.IDParameter)
+	if err := w.cache.Set(rawCacheKey, realtimeData, 24*time.Hour); err != nil {
 		logger.GetLogger().Warnf("Failed to save raw data to cache: %v", err)
 	} else {
-		logger.GetLogger().Infof("[READ] Raw parameter cached: parameter_id=%d, parameter_nama=%s, raw_value=%v, processed_value=%v, cache_key=%s",
-			config.IDParameter, param.Nama, realtimeData.RawValue, realtimeData.ProcessedValue, cacheKey)
+		logger.GetLogger().Infof("[RAW READ] parameter_id=%d, parameter_nama=%s, mode=%s, raw_value=%v, processed_value=%v",
+			config.IDParameter, param.Nama, paramMode, realtimeData.RawValue, realtimeData.ProcessedValue)
 	}
 
-	// NOTIFY Formula Engine (do not broadcast)
-	// Formula Engine will evaluate formulas and broadcast clean data
-	if w.formulaEngine != nil {
-		logger.GetLogger().Debugf("[READ] Notifying Formula Engine: parameter_id=%d", config.IDParameter)
-		w.formulaEngine.OnRawParameterUpdated(config.IDParameter, &realtimeData)
-	} else {
-		logger.GetLogger().Warnf("[READ] Formula Engine is nil, cannot notify: parameter_id=%d", config.IDParameter)
+	// ============================================
+	// STEP 2: Handle SOURCE vs DIRECT differently
+	// ============================================
+	if paramMode == domain.ParameterModeSOURCE {
+		// SOURCE: Internal only, tidak dibroadcast
+		// Only notify Formula Engine (for CLEAN derivation)
+		if w.formulaEngine != nil {
+			logger.GetLogger().Debugf("[SOURCE] Notifying Formula Engine: parameter_id=%d", config.IDParameter)
+			w.formulaEngine.OnRawParameterUpdated(config.IDParameter, &realtimeData)
+		}
+		logger.GetLogger().Debugf("[SOURCE] Parameter %d: RAW cached, NOT broadcast (internal only)", config.IDParameter)
+		return nil
+	}
+
+	// DIRECT: Nilai sudah clean, dibroadcast langsung
+	if paramMode == domain.ParameterModeDIRECT {
+		// Create CLEAN data (no raw value exposed)
+		cleanData := domain.RealtimeData{
+			ParameterID:    config.IDParameter,
+			ParameterNama:  param.Nama,
+			ParameterType:  param.Type,
+			DeviceNama:     device.Nama,
+			RawValue:       nil,            // CLEAN data does NOT expose raw value
+			ProcessedValue: processedValue, // This is the CLEAN value
+			CustomRumus:    param.Unit,     // Use CustomRumus field to pass unit (temporary)
+			Timestamp:      time.Now(),
+			Status:         "online",
+			Error:          nil,
+		}
+
+		// Save CLEAN data to public cache
+		cleanCacheKey := fmt.Sprintf("parameter:clean:%d", config.IDParameter)
+		if err := w.cache.Set(cleanCacheKey, cleanData, 24*time.Hour); err != nil {
+			logger.GetLogger().Warnf("Failed to save clean data to cache: %v", err)
+		} else {
+			logger.GetLogger().Infof("[CLEAN EMIT] parameter_id=%d, parameter_nama=%s, clean_value=%v",
+				config.IDParameter, param.Nama, cleanData.ProcessedValue)
+		}
+
+		// Broadcast CLEAN data via WebSocket
+		if w.wsHub != nil {
+			logger.GetLogger().Debugf("[BROADCAST] Broadcasting DIRECT parameter clean data: parameter_id=%d", config.IDParameter)
+			w.wsHub.BroadcastDataUpdate(cleanData)
+		}
+
+		// Also notify Formula Engine (for CLEAN derivation if needed)
+		if w.formulaEngine != nil {
+			logger.GetLogger().Debugf("[DIRECT] Notifying Formula Engine: parameter_id=%d", config.IDParameter)
+			w.formulaEngine.OnRawParameterUpdated(config.IDParameter, &realtimeData)
+		}
+
+		return nil
 	}
 
 	return nil

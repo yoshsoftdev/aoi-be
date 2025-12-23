@@ -131,15 +131,15 @@ func (e *WorkflowEngine) evaluateWorkflow(workflow *domain.Workflow, updatedPara
 
 	for _, condition := range workflow.Conditions {
 		// Get parameter value from cache
-		// Workflow hanya bekerja pada CLEAN DATA (formula/output parameters)
-		// Hanya baca dari output cache, JANGAN baca dari raw cache
+		// Workflow hanya bekerja pada CLEAN DATA (DIRECT, CLEAN, FORMULA)
+		// Hanya baca dari clean cache, JANGAN baca dari raw cache
 		var paramData *domain.RealtimeData
-		cacheKey := fmt.Sprintf("parameter:out:%d", condition.ParameterID)
+		cleanCacheKey := fmt.Sprintf("parameter:clean:%d", condition.ParameterID)
 
-		if err := e.cache.Get(cacheKey, &paramData); err != nil {
-			// Parameter clean data tidak ditemukan - ini berarti parameter bukan formula/output
-			// Workflow hanya boleh monitor parameter yang sudah clean
-			log.Debugf("WorkflowEngine: Clean data for parameter %d not found in cache (parameter:out:%d). Workflow only works on clean data (formula parameters).", condition.ParameterID, condition.ParameterID)
+		if err := e.cache.Get(cleanCacheKey, &paramData); err != nil {
+			// Parameter clean data tidak ditemukan
+			// Workflow hanya boleh monitor parameter yang sudah clean (DIRECT, CLEAN, FORMULA)
+			log.Debugf("WorkflowEngine: Clean data for parameter %d not found in cache (parameter:clean:%d). Workflow only works on clean data (DIRECT, CLEAN, FORMULA).", condition.ParameterID, condition.ParameterID)
 			allConditionsMet = false
 			break
 		}

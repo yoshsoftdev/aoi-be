@@ -47,13 +47,18 @@ func SetupRoutes(
 		}
 		devices := v1.Group("/devices")
 		{
-			devices.GET("", deviceHandler.GetAll)
-			devices.GET("/type", deviceHandler.GetByType)
-			devices.GET("/:id", deviceHandler.GetByID)
-			devices.POST("", deviceHandler.Create)
-			devices.PATCH("/:id", deviceHandler.Update)
-			devices.DELETE("/:id", deviceHandler.Delete)
-			devices.POST("/:id/test-connection", deviceHandler.TestConnection)
+			// CRITICAL: Specific routes MUST come before parameterized routes
+			devices.GET("/type", deviceHandler.GetByType) // GET /api/v1/devices/type
+			// Base routes - register both empty and slash for compatibility
+			devices.GET("/", deviceHandler.GetAll)  // GET /api/v1/devices/ (preferred)
+			devices.GET("", deviceHandler.GetAll)   // GET /api/v1/devices (fallback)
+			devices.POST("/", deviceHandler.Create) // POST /api/v1/devices/ (preferred)
+			devices.POST("", deviceHandler.Create)  // POST /api/v1/devices (fallback)
+			// Parameterized routes come after specific routes
+			devices.GET("/:id", deviceHandler.GetByID)                         // GET /api/v1/devices/:id
+			devices.PATCH("/:id", deviceHandler.Update)                        // PATCH /api/v1/devices/:id
+			devices.DELETE("/:id", deviceHandler.Delete)                       // DELETE /api/v1/devices/:id
+			devices.POST("/:id/test-connection", deviceHandler.TestConnection) // POST /api/v1/devices/:id/test-connection
 		}
 
 		// Modbus RTU
@@ -83,12 +88,15 @@ func SetupRoutes(
 		params := v1.Group("/parameters")
 		{
 			params.GET("", paramHandler.GetAll)
-			params.GET("/:id", paramHandler.GetByID)
 			params.POST("", paramHandler.Create)
+			// CRITICAL: Specific routes MUST come before parameterized routes
+			// Otherwise Gin will match /test-connection as /:id
+			params.POST("/test-connection", modbusHandler.TestConnection)
+			// Parameterized routes come after specific routes
+			params.GET("/:id", paramHandler.GetByID)
 			params.PATCH("/:id", paramHandler.Update)
 			params.DELETE("/:id", paramHandler.Delete)
 			params.POST("/:id/write", paramHandler.Write)
-			params.POST("/test-connection", modbusHandler.TestConnection)
 		}
 		modbusRTU := v1.Group("/modbus/rtu")
 		{
@@ -151,9 +159,13 @@ func SetupRoutes(
 		workflowHandler := handlers.NewWorkflowHandler(workflowRepo, workflowEngine)
 		workflow := v1.Group("/workflows")
 		{
-			workflow.GET("", workflowHandler.GetAll)
+			// Base routes - register both empty and slash for compatibility
+			workflow.GET("/", workflowHandler.GetAll)  // GET /api/v1/workflows/ (preferred)
+			workflow.GET("", workflowHandler.GetAll)   // GET /api/v1/workflows (fallback)
+			workflow.POST("/", workflowHandler.Create) // POST /api/v1/workflows/ (preferred)
+			workflow.POST("", workflowHandler.Create)  // POST /api/v1/workflows (fallback)
+			// Parameterized routes come after base routes
 			workflow.GET("/:id", workflowHandler.GetByID)
-			workflow.POST("", workflowHandler.Create)
 			workflow.PATCH("/:id", workflowHandler.Update)
 			workflow.DELETE("/:id", workflowHandler.Delete)
 		}

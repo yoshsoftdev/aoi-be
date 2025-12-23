@@ -96,14 +96,20 @@ func (h *WebSocketHub) Unregister(conn *websocket.Conn) {
 
 // BroadcastDataUpdate broadcasts CLEAN DATA to all connected WebSocket clients
 // This method implements the service.WebSocketBroadcaster interface
-// IMPORTANT: Only formula parameters should call this - raw parameters are internal only
+// CRITICAL: Only DIRECT, CLEAN, FORMULA should be broadcast - SOURCE is INTERNAL ONLY
+// This method receives CLEAN data from:
+//   - Workers (for DIRECT parameters after scaling)
+//   - Formula Engine (for CLEAN and FORMULA parameters)
 func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 	log := logger.GetLogger()
 
-	// GUARD: Only broadcast formula parameters (clean data)
-	// Raw parameters should never reach here
-	// This is a safety check - workers should not call this
-	log.Infof("[BROADCAST] BroadcastDataUpdate called: parameter_id=%d, parameter_nama=%s, parameter_type=%s, value=%v, device_nama=%s",
+	// GUARD: Ensure RawValue is nil (CLEAN data should not expose raw values)
+	if data.RawValue != nil {
+		log.Warnf("[BROADCAST] ⚠️  WARNING: Attempting to broadcast data with RawValue set (parameter_id=%d). RawValue will be removed.", data.ParameterID)
+		data.RawValue = nil // Force remove raw value
+	}
+
+	log.Infof("[BROADCAST] Broadcasting CLEAN data: parameter_id=%d, parameter_nama=%s, parameter_type=%s, clean_value=%v, device_nama=%s",
 		data.ParameterID, data.ParameterNama, data.ParameterType, data.ProcessedValue, data.DeviceNama)
 
 	// Create DashboardData payload compatible with frontend

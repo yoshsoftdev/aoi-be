@@ -106,10 +106,23 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) error {
 		}
 	}
 
-	// GUARD: Skip if this is a formula parameter (not raw)
-	// Formula parameters are handled by Formula Engine, not workers
-	if param.IsFormula {
-		logger.GetLogger().Debugf("Skipping formula parameter %d in worker - handled by Formula Engine", config.IDParameter)
+	// Determine parameter mode (default to DIRECT for backward compatibility)
+	// DIRECT = broadcast langsung, SOURCE = internal only
+	// Untuk backward compatibility: parameter yang sudah ada tanpa mode eksplisit
+	// akan muncul di dashboard (DIRECT), bukan hidden (SOURCE)
+	paramMode := param.ParameterMode
+	if paramMode == "" {
+		paramMode = domain.ParameterModeDIRECT
+	}
+
+	// CRITICAL: SOURCE parameters are NEVER broadcast, even if not used by formula
+	// SOURCE is explicitly set by user/system and should remain SOURCE
+	// Only DIRECT, CLEAN, and FORMULA should appear in dashboard
+
+	// GUARD: Only process SOURCE & DIRECT parameters here
+	// CLEAN & FORMULA are handled by Formula Engine, not workers
+	if paramMode != domain.ParameterModeSOURCE && paramMode != domain.ParameterModeDIRECT {
+		logger.GetLogger().Debugf("Skipping non-pollable parameter %d (Mode=%s) - handled by Formula Engine", config.IDParameter, paramMode)
 		return nil
 	}
 
@@ -127,23 +140,69 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) error {
 		Error:          nil,
 	}
 
-	// Save RAW data to cache with raw key (internal use only)
-	// This will NOT be broadcast to frontend
-	cacheKey := fmt.Sprintf("parameter:raw:%d", config.IDParameter)
-	if err := w.cache.Set(cacheKey, realtimeData, 24*time.Hour); err != nil {
+	// ============================================
+	// STEP 1: Save RAW data to internal cache (for SOURCE & DIRECT)
+	// ============================================
+	rawCacheKey := fmt.Sprintf("parameter:raw:%d", config.IDParameter)
+	if err := w.cache.Set(rawCacheKey, realtimeData, 24*time.Hour); err != nil {
 		logger.GetLogger().Warnf("Failed to save raw data to cache: %v", err)
 	} else {
-		logger.GetLogger().Infof("[READ] Raw parameter cached: parameter_id=%d, parameter_nama=%s, raw_value=%v, processed_value=%v, cache_key=%s",
-			config.IDParameter, param.Nama, realtimeData.RawValue, realtimeData.ProcessedValue, cacheKey)
+		logger.GetLogger().Infof("[RAW READ] parameter_id=%d, parameter_nama=%s, mode=%s, raw_value=%v, processed_value=%v",
+			config.IDParameter, param.Nama, paramMode, realtimeData.RawValue, realtimeData.ProcessedValue)
 	}
 
-	// NOTIFY Formula Engine (do not broadcast)
-	// Formula Engine will evaluate formulas and broadcast clean data
-	if w.formulaEngine != nil {
-		logger.GetLogger().Debugf("[READ] Notifying Formula Engine: parameter_id=%d", config.IDParameter)
-		w.formulaEngine.OnRawParameterUpdated(config.IDParameter, &realtimeData)
-	} else {
-		logger.GetLogger().Warnf("[READ] Formula Engine is nil, cannot notify: parameter_id=%d", config.IDParameter)
+	// ============================================
+	// STEP 2: Handle SOURCE vs DIRECT differently
+	// ============================================
+	if paramMode == domain.ParameterModeSOURCE {
+		// SOURCE: Internal only, tidak dibroadcast
+		// Only notify Formula Engine (for CLEAN derivation)
+		if w.formulaEngine != nil {
+			logger.GetLogger().Debugf("[SOURCE] Notifying Formula Engine: parameter_id=%d", config.IDParameter)
+			w.formulaEngine.OnRawParameterUpdated(config.IDParameter, &realtimeData)
+		}
+		logger.GetLogger().Debugf("[SOURCE] Parameter %d: RAW cached, NOT broadcast (internal only)", config.IDParameter)
+		return nil
+	}
+
+	// DIRECT: Nilai sudah clean, dibroadcast langsung
+	if paramMode == domain.ParameterModeDIRECT {
+		// Create CLEAN data (no raw value exposed)
+		cleanData := domain.RealtimeData{
+			ParameterID:    config.IDParameter,
+			ParameterNama:  param.Nama,
+			ParameterType:  param.Type,
+			DeviceNama:     deviceNama,
+			RawValue:       nil,            // CLEAN data does NOT expose raw value
+			ProcessedValue: processedValue, // This is the CLEAN value
+			CustomRumus:    param.Unit,     // Use CustomRumus field to pass unit (temporary)
+			Timestamp:      time.Now(),
+			Status:         "online",
+			Error:          nil,
+		}
+
+		// Save CLEAN data to public cache
+		cleanCacheKey := fmt.Sprintf("parameter:clean:%d", config.IDParameter)
+		if err := w.cache.Set(cleanCacheKey, cleanData, 24*time.Hour); err != nil {
+			logger.GetLogger().Warnf("Failed to save clean data to cache: %v", err)
+		} else {
+			logger.GetLogger().Infof("[CLEAN EMIT] parameter_id=%d, parameter_nama=%s, clean_value=%v",
+				config.IDParameter, param.Nama, cleanData.ProcessedValue)
+		}
+
+		// Broadcast CLEAN data via WebSocket
+		if w.wsHub != nil {
+			logger.GetLogger().Debugf("[BROADCAST] Broadcasting DIRECT parameter clean data: parameter_id=%d", config.IDParameter)
+			w.wsHub.BroadcastDataUpdate(cleanData)
+		}
+
+		// Also notify Formula Engine (for CLEAN derivation if needed)
+		if w.formulaEngine != nil {
+			logger.GetLogger().Debugf("[DIRECT] Notifying Formula Engine: parameter_id=%d", config.IDParameter)
+			w.formulaEngine.OnRawParameterUpdated(config.IDParameter, &realtimeData)
+		}
+
+		return nil
 	}
 
 	return nil
