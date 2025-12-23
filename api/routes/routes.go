@@ -2,15 +2,11 @@ package routes
 
 import (
 	"fmt"
-	"io/fs"
-	"net/http"
-	"path/filepath"
 	"strings"
 
 	"aoi-backend/api/handlers"
 	"aoi-backend/api/middleware"
 	"aoi-backend/internal/core/cache"
-	"aoi-backend/internal/embed"
 	"aoi-backend/internal/repository"
 	"aoi-backend/internal/scheduler"
 	"aoi-backend/internal/service"
@@ -171,118 +167,25 @@ func SetupRoutes(
 		}
 	}
 
-	// Serve static files (embedded frontend)
-	staticFS := embed.GetStaticFiles()
+	// Frontend is served by Nginx on port 80
+	// Backend only serves API endpoints
+	router.NoRoute(func(c *gin.Context) {
+		path := c.Request.URL.Path
 
-	// Create a file server from embedded files
-	fileSystem, err := fs.Sub(staticFS, ".")
-	if err == nil {
-		// Serve static files
-		router.StaticFS("/static", http.FS(fileSystem))
-
-		// Serve index.html for all non-API routes (SPA routing)
-		router.NoRoute(func(c *gin.Context) {
-			path := c.Request.URL.Path
-
-			// If it's an API route, return 404 JSON
-			if strings.HasPrefix(path, "/api/") {
-				c.JSON(404, gin.H{
-					"success": false,
-					"error":   fmt.Sprintf("Route not found: %s %s", c.Request.Method, path),
-				})
-				return
-			}
-
-			// Try to serve the file from embedded filesystem
-			file, err := fileSystem.Open(strings.TrimPrefix(path, "/"))
-			if err == nil {
-				defer file.Close()
-
-				// Check if it's a directory
-				stat, err := file.Stat()
-				if err == nil && stat.IsDir() {
-					// Try index.html in directory
-					indexPath := filepath.Join(strings.TrimPrefix(path, "/"), "index.html")
-					indexFile, err := fileSystem.Open(indexPath)
-					if err == nil {
-						defer indexFile.Close()
-						indexStat, _ := indexFile.Stat()
-						c.DataFromReader(http.StatusOK, indexStat.Size(), "text/html", indexFile, nil)
-						return
-					}
-				} else {
-					// Serve the file
-					c.DataFromReader(http.StatusOK, stat.Size(), getContentType(path), file, nil)
-					return
-				}
-			}
-
-			// Fallback to index.html for SPA routing
-			indexFile, err := fileSystem.Open("index.html")
-			if err == nil {
-				defer indexFile.Close()
-				stat, _ := indexFile.Stat()
-				c.DataFromReader(http.StatusOK, stat.Size(), "text/html", indexFile, nil)
-				return
-			}
-
-			// Last resort: 404
+		// If it's an API route, return 404 JSON
+		if strings.HasPrefix(path, "/api/") {
 			c.JSON(404, gin.H{
 				"success": false,
-				"error":   "Not found",
+				"error":   fmt.Sprintf("Route not found: %s %s", c.Request.Method, path),
 			})
-		})
-	} else {
-		// If embedding fails, fallback to 404 handler
-		router.NoRoute(func(c *gin.Context) {
-			if strings.HasPrefix(c.Request.URL.Path, "/api/") {
-				c.JSON(404, gin.H{
-					"success": false,
-					"error":   fmt.Sprintf("Route not found: %s %s", c.Request.Method, c.Request.URL.Path),
-				})
-			} else {
-				c.JSON(404, gin.H{
-					"success": false,
-					"error":   "Frontend not available",
-				})
-			}
-		})
-	}
+		} else {
+			// Non-API routes should be handled by Nginx (frontend)
+			c.JSON(404, gin.H{
+				"success": false,
+				"error":   "API endpoint not found. Frontend is served by Nginx on port 80.",
+			})
+		}
+	})
 
 	return router
-}
-
-// getContentType returns the content type based on file extension
-func getContentType(path string) string {
-	ext := filepath.Ext(path)
-	switch ext {
-	case ".html":
-		return "text/html"
-	case ".css":
-		return "text/css"
-	case ".js":
-		return "application/javascript"
-	case ".json":
-		return "application/json"
-	case ".png":
-		return "image/png"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".gif":
-		return "image/gif"
-	case ".svg":
-		return "image/svg+xml"
-	case ".ico":
-		return "image/x-icon"
-	case ".woff":
-		return "font/woff"
-	case ".woff2":
-		return "font/woff2"
-	case ".ttf":
-		return "font/ttf"
-	case ".eot":
-		return "application/vnd.ms-fontobject"
-	default:
-		return "application/octet-stream"
-	}
 }
