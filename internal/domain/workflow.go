@@ -44,21 +44,23 @@ func (WorkflowCondition) TableName() string {
 }
 
 // WorkflowAction represents an action in a workflow
-// THEN trigger(parameter_id) OR write(parameter_id, value) OR emit event OR delay
+// THEN trigger(parameter_id) OR write(parameter_id, value) OR emit event OR delay OR alarm
 // ActionType:
 //   - TRIGGER_WRITE: trigger PRESET parameter (no value sent)
 //   - WRITE_WITH_VALUE: write DYNAMIC parameter (value required)
 //   - event: emit event
 //   - delay: delay execution
+//   - alarm: show notification alarm with custom message
 type WorkflowAction struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	WorkflowID  uint      `gorm:"not null;index" json:"workflow_id"`
-	ActionType  string    `gorm:"size:20;not null" json:"action_type"`    // 'TRIGGER_WRITE', 'WRITE_WITH_VALUE', 'event', 'delay'
-	ParameterID *uint     `gorm:"index" json:"parameter_id,omitempty"`    // Untuk action_type='TRIGGER_WRITE' atau 'WRITE_WITH_VALUE', parameter WRITE yang akan di-write
-	Value       *float64  `gorm:"type:REAL" json:"value,omitempty"`       // Untuk action_type='WRITE_WITH_VALUE', nilai yang akan di-write (WAJIB untuk DYNAMIC)
-	EventName   *string   `gorm:"size:100" json:"event_name,omitempty"`   // Untuk action_type='event', nama event
-	DelayMs     *int      `gorm:"type:INTEGER" json:"delay_ms,omitempty"` // Untuk action_type='delay', delay dalam milliseconds
-	CreatedAt   time.Time `json:"created_at"`
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	WorkflowID   uint      `gorm:"not null;index" json:"workflow_id"`
+	ActionType   string    `gorm:"size:20;not null" json:"action_type"`      // 'TRIGGER_WRITE', 'WRITE_WITH_VALUE', 'event', 'delay', 'alarm'
+	ParameterID  *uint     `gorm:"index" json:"parameter_id,omitempty"`      // Untuk action_type='TRIGGER_WRITE' atau 'WRITE_WITH_VALUE', parameter WRITE yang akan di-write
+	Value        *float64  `gorm:"type:REAL" json:"value,omitempty"`         // Untuk action_type='WRITE_WITH_VALUE', nilai yang akan di-write (WAJIB untuk DYNAMIC)
+	EventName    *string   `gorm:"size:100" json:"event_name,omitempty"`     // Untuk action_type='event', nama event
+	DelayMs      *int      `gorm:"type:INTEGER" json:"delay_ms,omitempty"`   // Untuk action_type='delay', delay dalam milliseconds
+	AlarmMessage *string   `gorm:"type:text" json:"alarm_message,omitempty"` // Untuk action_type='alarm', pesan notifikasi yang akan ditampilkan
+	CreatedAt    time.Time `json:"created_at"`
 
 	// Relations
 	Workflow  *Workflow  `gorm:"foreignKey:WorkflowID" json:"workflow,omitempty"`

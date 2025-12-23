@@ -193,3 +193,30 @@ func (h *WebSocketHub) BroadcastStatusUpdate(paramID uint, status string) {
 
 	h.broadcast <- bytes
 }
+
+// BroadcastAlarm broadcasts an alarm notification to all connected WebSocket clients
+func (h *WebSocketHub) BroadcastAlarm(workflowID uint, workflowName string, message string) {
+	log := logger.GetLogger()
+	log.Infof("[BROADCAST] Broadcasting alarm: workflow_id=%d, workflow_name=%s, message=%s", workflowID, workflowName, message)
+
+	alarmData := map[string]interface{}{
+		"workflow_id":   workflowID,
+		"workflow_name": workflowName,
+		"message":       message,
+		"timestamp":     time.Now().Format(time.RFC3339),
+	}
+
+	wsMessage := map[string]interface{}{
+		"type": "alarm",
+		"data": alarmData,
+	}
+
+	bytes, err := json.Marshal(wsMessage)
+	if err != nil {
+		log.Errorf("[BROADCAST] Failed to marshal alarm message: %v", err)
+		return
+	}
+
+	log.Debugf("[BROADCAST] Queuing alarm message: %d bytes, workflow_id=%d", len(bytes), workflowID)
+	h.broadcast <- bytes
+}

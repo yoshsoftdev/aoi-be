@@ -306,38 +306,62 @@ func (h *ParameterHandler) Delete(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"success": false,
+			"status":  "REJECTED",
+			"reason":  "INVALID_ID",
 			"error":   "Invalid parameter ID",
 		})
 		return
 	}
 
-	if err := h.service.Delete(uint(id)); err != nil {
+	parameterID := uint(id)
+	log := logger.GetLogger()
+	log.Infof("[PARAMETER DELETE HANDLER] Request to delete parameter_id=%d", parameterID)
+
+	// Attempt delete with validation
+	if err := h.service.Delete(parameterID); err != nil {
 		if appErr, ok := err.(*errors.AppError); ok {
+			// Check if it's PARAMETER_IN_USE error
+			if appErr.Details == "PARAMETER_IN_USE" {
+				log.Warnf("[PARAMETER DELETE HANDLER] ❌ REJECTED: Parameter %d is in use", parameterID)
+				c.JSON(http.StatusConflict, gin.H{
+					"status": "REJECTED",
+					"reason": "PARAMETER_IN_USE",
+					"error":  appErr.Message,
+				})
+				return
+			}
+			// Other AppError
 			c.JSON(appErr.Code, gin.H{
-				"success": false,
-				"error":   appErr.Message,
+				"status": "REJECTED",
+				"reason": appErr.Details,
+				"error":  appErr.Message,
 			})
 			return
 		}
+		// Generic error
+		log.Errorf("[PARAMETER DELETE HANDLER] ❌ Error deleting parameter %d: %v", parameterID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"error":   err.Error(),
+			"status": "REJECTED",
+			"reason": "INTERNAL_ERROR",
+			"error":  err.Error(),
 		})
 		return
 	}
 
+	// Success - reload scheduler and formula engine
+	log.Infof("[PARAMETER DELETE HANDLER] ✅ Successfully deleted parameter_id=%d, reloading systems...", parameterID)
+
 	// Reload scheduler to remove deleted parameter
 	if h.schedulerManager != nil {
-		logger.GetLogger().Info("Reloading scheduler after parameter deletion")
+		log.Info("[PARAMETER DELETE HANDLER] Reloading scheduler after parameter deletion")
 		h.schedulerManager.Reload()
 	}
 
 	// Reload formula engine to remove deleted parameter from registry
 	if h.formulaEngine != nil {
-		logger.GetLogger().Info("Reloading formula engine after parameter deletion")
+		log.Info("[PARAMETER DELETE HANDLER] Reloading formula engine after parameter deletion")
 		if err := h.formulaEngine.LoadAll(); err != nil {
-			logger.GetLogger().Warnf("Failed to reload formula engine: %v", err)
+			log.Warnf("[PARAMETER DELETE HANDLER] Failed to reload formula engine: %v", err)
 		} else {
 			// Evaluate all remaining formulas after reload
 			go func() {
@@ -347,9 +371,10 @@ func (h *ParameterHandler) Delete(c *gin.Context) {
 		}
 	}
 
+	// Success response
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "Parameter deleted successfully",
+		"status":            "OK",
+		"deleted_parameter_id": parameterID,
 	})
 }
 

@@ -17,6 +17,7 @@ type WorkflowRepository interface {
 	GetByParameterID(parameterID uint) ([]domain.Workflow, error) // Get workflows that monitor this parameter
 	GetStateByWorkflowID(workflowID uint) (*domain.WorkflowState, error)
 	CreateOrUpdateState(state *domain.WorkflowState) error
+	CheckParameterUsage(parameterID uint) (bool, []uint, error) // Check if parameter is used in workflows, returns (isUsed, workflowIDs, error)
 }
 
 type workflowRepository struct{}
@@ -137,4 +138,47 @@ func (r *workflowRepository) CreateOrUpdateState(state *domain.WorkflowState) er
 	// Update existing state
 	state.ID = existing.ID
 	return database.GetDB().Save(state).Error
+}
+
+// CheckParameterUsage checks if a parameter is used in any workflow
+// Returns: (isUsed, workflowIDs, error)
+// Checks both workflow_condition (monitored parameter) and workflow_action (write target)
+func (r *workflowRepository) CheckParameterUsage(parameterID uint) (bool, []uint, error) {
+	db := database.GetDB()
+	var workflowIDs []uint
+
+	// Check workflow_condition (parameter is monitored)
+	var conditionWorkflows []uint
+	err := db.Model(&domain.WorkflowCondition{}).
+		Where("parameter_id = ?", parameterID).
+		Distinct().
+		Pluck("workflow_id", &conditionWorkflows).Error
+	if err != nil {
+		return false, nil, err
+	}
+
+	// Check workflow_action (parameter is written to)
+	var actionWorkflows []uint
+	err = db.Model(&domain.WorkflowAction{}).
+		Where("parameter_id = ?", parameterID).
+		Distinct().
+		Pluck("workflow_id", &actionWorkflows).Error
+	if err != nil {
+		return false, nil, err
+	}
+
+	// Combine and deduplicate workflow IDs
+	workflowMap := make(map[uint]bool)
+	for _, id := range conditionWorkflows {
+		workflowMap[id] = true
+	}
+	for _, id := range actionWorkflows {
+		workflowMap[id] = true
+	}
+
+	for id := range workflowMap {
+		workflowIDs = append(workflowIDs, id)
+	}
+
+	return len(workflowIDs) > 0, workflowIDs, nil
 }

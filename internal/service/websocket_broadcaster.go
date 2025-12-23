@@ -6,5 +6,5 @@ import "aoi-backend/internal/domain"
 // This interface breaks the circular dependency between service and worker packages
 type WebSocketBroadcaster interface {
 	BroadcastDataUpdate(data domain.RealtimeData)
+	BroadcastAlarm(workflowID uint, workflowName string, message string)
 }
-

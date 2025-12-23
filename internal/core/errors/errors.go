@@ -44,6 +44,14 @@ func NewValidationError(message string, details string) *AppError {
 	}
 }
 
+func NewAppError(code int, errorCode string, message string) *AppError {
+	return &AppError{
+		Code:    code,
+		Message: message,
+		Details: errorCode,
+	}
+}
+
 func WrapError(err error, message string) error {
 	return fmt.Errorf("%s: %w", message, err)
 }

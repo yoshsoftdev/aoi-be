@@ -83,11 +83,12 @@ type CreateWorkflowCondition struct {
 }
 
 type CreateWorkflowAction struct {
-	ActionType  string   `json:"action_type" binding:"required,oneof=write event delay"`
-	ParameterID *uint    `json:"parameter_id,omitempty"` // Required for 'write' action
-	Value       *float64 `json:"value,omitempty"`        // Required for 'write' action
-	EventName   *string  `json:"event_name,omitempty"`   // Required for 'event' action
-	DelayMs     *int     `json:"delay_ms,omitempty"`     // Required for 'delay' action
+	ActionType   string   `json:"action_type" binding:"required,oneof=TRIGGER_WRITE WRITE_WITH_VALUE write event delay alarm"`
+	ParameterID  *uint    `json:"parameter_id,omitempty"`  // Required for 'TRIGGER_WRITE', 'WRITE_WITH_VALUE', 'write' actions
+	Value        *float64 `json:"value,omitempty"`         // Required for 'WRITE_WITH_VALUE', 'write' actions
+	EventName    *string  `json:"event_name,omitempty"`    // Required for 'event' action
+	DelayMs      *int     `json:"delay_ms,omitempty"`      // Required for 'delay' action
+	AlarmMessage *string  `json:"alarm_message,omitempty"` // Required for 'alarm' action
 }
 
 // Create creates a new workflow
@@ -156,11 +157,12 @@ func (h *WorkflowHandler) Create(c *gin.Context) {
 	// Build actions
 	for _, actionReq := range req.Actions {
 		workflow.Actions = append(workflow.Actions, domain.WorkflowAction{
-			ActionType:  actionReq.ActionType,
-			ParameterID: actionReq.ParameterID,
-			Value:       actionReq.Value,
-			EventName:   actionReq.EventName,
-			DelayMs:     actionReq.DelayMs,
+			ActionType:   actionReq.ActionType,
+			ParameterID:  actionReq.ParameterID,
+			Value:        actionReq.Value,
+			EventName:    actionReq.EventName,
+			DelayMs:      actionReq.DelayMs,
+			AlarmMessage: actionReq.AlarmMessage,
 		})
 	}
 
@@ -248,11 +250,12 @@ func (h *WorkflowHandler) Update(c *gin.Context) {
 		workflow.Actions = []domain.WorkflowAction{}
 		for _, actionReq := range req.Actions {
 			workflow.Actions = append(workflow.Actions, domain.WorkflowAction{
-				ActionType:  actionReq.ActionType,
-				ParameterID: actionReq.ParameterID,
-				Value:       actionReq.Value,
-				EventName:   actionReq.EventName,
-				DelayMs:     actionReq.DelayMs,
+				ActionType:   actionReq.ActionType,
+				ParameterID:  actionReq.ParameterID,
+				Value:        actionReq.Value,
+				EventName:    actionReq.EventName,
+				DelayMs:      actionReq.DelayMs,
+				AlarmMessage: actionReq.AlarmMessage,
 			})
 		}
 	}

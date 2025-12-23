@@ -73,7 +73,16 @@ func main() {
 
 	// Initialize services
 	deviceService := service.NewDeviceService(deviceRepo)
-	paramService := service.NewParameterService(paramRepo)
+	paramService := service.NewParameterService(
+		paramRepo,
+		workflowRepo,
+		formulaRepo,
+		modbusRTURepo,
+		modbusTCPRepo,
+		snmpRepo,
+		presetRepo,
+		cacheInstance,
+	)
 	formulaEval := service.NewFormulaEvaluator()
 
 	// Initialize WebSocket hub
@@ -124,12 +133,13 @@ func main() {
 		formulaEngine,
 	)
 
-	// Initialize Workflow Engine
+	// Initialize Workflow Engine (pass wsHub for alarm notifications)
 	workflowEngine := service.NewWorkflowEngine(
 		workflowRepo,
 		paramRepo,
 		cacheInstance,
 		writeService,
+		wsHub, // Pass WebSocketHub for broadcasting alarms
 	)
 
 	// Load all workflows from database
@@ -176,24 +186,15 @@ func main() {
 		wsHub,
 	)
 
-	// Initialize scheduler
+	// Initialize scheduler (but don't start yet)
 	schedulerManager := scheduler.NewSchedulerManager(
 		modbusRTUWorker,
 		modbusTCPWorker,
 		snmpWorker,
 	)
+	log.Info("Scheduler initialized (not started yet)")
 
-	// Control polling based on --poof flag
-	// If --poof flag is present, disable polling
-	// If --poof flag is NOT present, enable polling (default behavior)
-	if *poofMode {
-		log.Info("Scheduler initialized (polling disabled via --poof flag)")
-	} else {
-		schedulerManager.Start()
-		log.Info("Scheduler started (polling enabled)")
-	}
-
-	// Setup routes
+	// Setup routes FIRST (before starting polling)
 	router := routes.SetupRoutes(
 		deviceService,
 		paramService,
@@ -208,20 +209,32 @@ func main() {
 	)
 	log.Info("Routes configured successfully")
 
-	// Start server
+	// Start server and wait for it to be ready
 	addr := fmt.Sprintf("%s:%s", cfg.Server.Host, cfg.Server.Port)
 	log.Infof("Server starting on %s", addr)
 
-	// Graceful shutdown
+	// Start server in goroutine
 	go func() {
 		if err := router.Run(addr); err != nil {
 			log.Fatalf("Failed to start server: %v", err)
 		}
 	}()
 
-	// Give server a moment to start
-	time.Sleep(100 * time.Millisecond)
+	// Wait for server to be ready (give it time to bind to port and initialize routes)
+	time.Sleep(500 * time.Millisecond)
 	log.Info("Server is ready to accept connections")
+
+	// NOW start polling AFTER server is ready
+	// Control polling based on --poof flag
+	// If --poof flag is present, disable polling
+	// If --poof flag is NOT present, enable polling (default behavior)
+	if *poofMode {
+		log.Info("Polling disabled via --poof flag")
+	} else {
+		log.Info("Starting scheduler and polling...")
+		schedulerManager.Start()
+		log.Info("Scheduler started (polling enabled)")
+	}
 
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)

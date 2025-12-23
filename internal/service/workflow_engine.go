@@ -16,10 +16,11 @@ import (
 // Workflow hanya bekerja pada parameter_id, tidak tahu register/slave/address
 // Workflow dievaluasi SETELAH data READ bersih (setelah formula engine)
 type WorkflowEngine struct {
-	workflowRepo repository.WorkflowRepository
-	paramRepo    repository.ParameterRepository
-	cache        cache.Cache
-	writeService *WriteService
+	workflowRepo  repository.WorkflowRepository
+	paramRepo     repository.ParameterRepository
+	cache         cache.Cache
+	writeService  *WriteService
+	wsBroadcaster WebSocketBroadcaster // For broadcasting alarm notifications
 	// eventBus     EventBus // TODO: Implement event bus for event actions
 
 	// In-memory registry: parameter_id -> workflows that monitor it
@@ -35,12 +36,14 @@ func NewWorkflowEngine(
 	paramRepo repository.ParameterRepository,
 	cache cache.Cache,
 	writeService *WriteService,
+	wsBroadcaster WebSocketBroadcaster,
 ) *WorkflowEngine {
 	return &WorkflowEngine{
 		workflowRepo:     workflowRepo,
 		paramRepo:        paramRepo,
 		cache:            cache,
 		writeService:     writeService,
+		wsBroadcaster:    wsBroadcaster,
 		workflowsByParam: make(map[uint][]*domain.Workflow),
 		debounceMap:      make(map[uint]time.Time),
 		debounceWindow:   5 * time.Second, // Default: 5 seconds debounce
@@ -405,6 +408,33 @@ func (e *WorkflowEngine) executeAction(workflowID uint, action domain.WorkflowAc
 		}
 		log.Infof("WorkflowEngine: Delay action: workflow=%d, delay=%dms", workflowID, *action.DelayMs)
 		time.Sleep(time.Duration(*action.DelayMs) * time.Millisecond)
+
+	case "alarm":
+		// ALARM: Show notification with custom message
+		if action.AlarmMessage == nil || *action.AlarmMessage == "" {
+			return fmt.Errorf("alarm_message is required for alarm action")
+		}
+
+		// Get workflow name for notification
+		workflow, err := e.workflowRepo.GetByID(workflowID)
+		if err != nil {
+			log.Warnf("WorkflowEngine: Failed to get workflow %d for alarm: %v", workflowID, err)
+			workflow = nil
+		}
+
+		workflowName := "Unknown Workflow"
+		if workflow != nil {
+			workflowName = workflow.Nama
+		}
+
+		log.Infof("WorkflowEngine: Alarm action triggered: workflow=%d (%s), message=%s", workflowID, workflowName, *action.AlarmMessage)
+
+		// Broadcast alarm notification via WebSocket
+		if e.wsBroadcaster != nil {
+			e.wsBroadcaster.BroadcastAlarm(workflowID, workflowName, *action.AlarmMessage)
+		} else {
+			log.Warnf("WorkflowEngine: WebSocket broadcaster not available, alarm notification not sent")
+		}
 
 	default:
 		return fmt.Errorf("unknown action type: %s", action.ActionType)
