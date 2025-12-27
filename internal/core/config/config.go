@@ -53,7 +53,7 @@ func Load() (*Config, error) {
 	viper.AddConfigPath("../..")
 
 	// Set defaults
-	viper.SetDefault("SERVER_PORT", "8081")
+	viper.SetDefault("SERVER_PORT", "8071")
 	viper.SetDefault("SERVER_HOST", "0.0.0.0")
 	viper.SetDefault("DB_PATH", "data/aoi-bgn.db")
 	viper.SetDefault("REDIS_ENABLED", false)
