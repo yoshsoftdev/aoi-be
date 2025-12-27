@@ -90,12 +90,18 @@ func main() {
 	go wsHub.Run()
 	log.Info("WebSocket hub started")
 
+	// Initialize Threshold Service (needed for Formula Engine)
+	thresholdRepo := repository.NewThresholdRepository()
+	thresholdService := service.NewThresholdService(thresholdRepo)
+	log.Info("Threshold service initialized")
+
 	// Initialize Formula Engine
 	formulaEngine := service.NewFormulaEngine(
 		formulaRepo,
 		paramRepo,
 		cacheInstance,
 		wsHub,
+		thresholdService,
 	)
 
 	// Load all formulas from database
@@ -155,7 +161,7 @@ func main() {
 		workflowEngine.OnParameterUpdated(parameterID, data)
 	})
 
-	// Initialize workers (pass formulaEngine for reactive formula evaluation)
+	// Initialize workers (pass formulaEngine for reactive formula evaluation and thresholdService for alarm status)
 	modbusRTUWorker := worker.NewModbusRTUWorker(
 		modbusRTURepo,
 		paramRepo,
@@ -163,6 +169,7 @@ func main() {
 		cacheInstance,
 		formulaEval,
 		formulaEngine,
+		thresholdService,
 		wsHub,
 	)
 
@@ -173,6 +180,7 @@ func main() {
 		cacheInstance,
 		formulaEval,
 		formulaEngine,
+		thresholdService,
 		wsHub,
 	)
 
@@ -183,6 +191,7 @@ func main() {
 		cacheInstance,
 		formulaEval,
 		formulaEngine,
+		thresholdService,
 		wsHub,
 	)
 
@@ -266,6 +275,7 @@ func runMigrations() error {
 		&domain.Workflow{},
 		&domain.WorkflowCondition{},
 		&domain.WorkflowAction{},
+		&domain.Threshold{},
 		&domain.WorkflowState{},
 	); err != nil {
 		return err

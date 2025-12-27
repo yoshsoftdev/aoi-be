@@ -13,6 +13,7 @@ type RealtimeData struct {
 	Timestamp      time.Time   `json:"timestamp"`
 	Status         string      `json:"status"` // online, offline, error
 	Error          *string     `json:"error,omitempty"`
+	AlarmStatus    string      `json:"alarmstatus"` // normal, abnormal, warning_low, warning_high, critical_low, critical_high
 }
 
 // DashboardData is a simplified structure sent to dashboard via WebSocket
@@ -23,6 +24,7 @@ type DashboardData struct {
 	Value         interface{} `json:"value"` // Final processed value
 	Timestamp     time.Time   `json:"timestamp"`
 	Status        string      `json:"status"` // online, offline, error
+	AlarmStatus   string      `json:"alarmstatus"` // normal, abnormal, warning_low, warning_high, critical_low, critical_high
 }
 
 // CleanData is the clean data format sent to frontend via WebSocket

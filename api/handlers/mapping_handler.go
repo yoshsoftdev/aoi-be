@@ -452,12 +452,24 @@ func (h *MappingHandler) Save(c *gin.Context) {
 		}()
 	}
 
+	// Collect clean parameters (DIRECT mode) - parameters that are already clean and broadcast directly
+	var cleanParameters []gin.H
+	for _, param := range createdParams {
+		if param.ParameterMode == domain.ParameterModeDIRECT {
+			cleanParameters = append(cleanParameters, gin.H{
+				"id":   param.ID,
+				"nama": param.Nama,
+			})
+		}
+	}
+
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
 		"data": gin.H{
 			"koneksi_id":       koneksi.ID,
 			"koneksi_name":     koneksi.Nama,
 			"parameters_count": len(createdParams),
+			"clean_parameters": cleanParameters,
 		},
 		"message": "Connection and mappings saved successfully",
 	})

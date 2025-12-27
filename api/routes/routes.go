@@ -65,11 +65,14 @@ func SetupRoutes(
 		paramRepo := repository.NewParameterRepository()
 		presetRepo := repository.NewPresetRepository()
 		deviceRepo := repository.NewDeviceRepository()
+		thresholdRepo := repository.NewThresholdRepository()
+		thresholdService := service.NewThresholdService(thresholdRepo)
 		formulaEngine := service.NewFormulaEngine(
 			repository.NewFormulaRepository(),
 			paramRepo,
 			cache,
 			wsHub,
+			thresholdService,
 		)
 		writeService := service.NewWriteService(
 			paramRepo,
@@ -164,6 +167,17 @@ func SetupRoutes(
 			workflow.GET("/:id", workflowHandler.GetByID)
 			workflow.PATCH("/:id", workflowHandler.Update)
 			workflow.DELETE("/:id", workflowHandler.Delete)
+		}
+
+		// Threshold (Alarm)
+		thresholdHandler := handlers.NewThresholdHandler(thresholdRepo)
+		threshold := v1.Group("/tracehold")
+		{
+			threshold.POST("", thresholdHandler.CreateOrUpdate)              // POST /api/v1/tracehold (create or update by parameter_id)
+			threshold.GET("", thresholdHandler.GetAll)                       // GET /api/v1/tracehold (get all)
+			threshold.GET("/:parameter_id", thresholdHandler.GetByParameterID) // GET /api/v1/tracehold/:parameter_id (get by parameter_id)
+			threshold.PUT("/:id", thresholdHandler.Update)                   // PUT /api/v1/tracehold/:id (update by threshold ID)
+			threshold.DELETE("/:id", thresholdHandler.Delete)                // DELETE /api/v1/tracehold/:id (delete by threshold ID)
 		}
 	}
 

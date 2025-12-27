@@ -14,13 +14,14 @@ import (
 )
 
 type SNMPWorker struct {
-	repo          repository.SNMPRepository
-	paramRepo     repository.ParameterRepository
-	deviceRepo    repository.DeviceRepository
-	cache         cache.Cache
-	formulaEval   *service.FormulaEvaluator
-	formulaEngine *service.FormulaEngine
-	wsHub         *WebSocketHub
+	repo            repository.SNMPRepository
+	paramRepo       repository.ParameterRepository
+	deviceRepo      repository.DeviceRepository
+	cache           cache.Cache
+	formulaEval     *service.FormulaEvaluator
+	formulaEngine   *service.FormulaEngine
+	thresholdService *service.ThresholdService
+	wsHub           *WebSocketHub
 }
 
 func NewSNMPWorker(
@@ -30,16 +31,18 @@ func NewSNMPWorker(
 	cache cache.Cache,
 	formulaEval *service.FormulaEvaluator,
 	formulaEngine *service.FormulaEngine,
+	thresholdService *service.ThresholdService,
 	wsHub *WebSocketHub,
 ) *SNMPWorker {
 	return &SNMPWorker{
-		repo:          repo,
-		paramRepo:     paramRepo,
-		deviceRepo:    deviceRepo,
-		cache:         cache,
-		formulaEval:   formulaEval,
-		formulaEngine: formulaEngine,
-		wsHub:         wsHub,
+		repo:            repo,
+		paramRepo:       paramRepo,
+		deviceRepo:      deviceRepo,
+		cache:           cache,
+		formulaEval:     formulaEval,
+		formulaEngine:   formulaEngine,
+		thresholdService: thresholdService,
+		wsHub:           wsHub,
 	}
 }
 
@@ -179,18 +182,24 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) error {
 			Timestamp:      time.Now(),
 			Status:         "online",
 			Error:          nil,
+			AlarmStatus:    domain.AlarmStatusNormal, // Default to normal
 		}
 
-		// Save CLEAN data to public cache
+		// Apply threshold to calculate alarm status
+		if w.thresholdService != nil {
+			w.thresholdService.ApplyThreshold(&cleanData)
+		}
+
+		// Save CLEAN data to public cache (with alarmstatus)
 		cleanCacheKey := fmt.Sprintf("parameter:clean:%d", config.IDParameter)
 		if err := w.cache.Set(cleanCacheKey, cleanData, 24*time.Hour); err != nil {
 			logger.GetLogger().Warnf("Failed to save clean data to cache: %v", err)
 		} else {
-			logger.GetLogger().Infof("[CLEAN EMIT] parameter_id=%d, parameter_nama=%s, clean_value=%v",
-				config.IDParameter, param.Nama, cleanData.ProcessedValue)
+			logger.GetLogger().Infof("[CLEAN EMIT] parameter_id=%d, parameter_nama=%s, clean_value=%v, alarmstatus=%s",
+				config.IDParameter, param.Nama, cleanData.ProcessedValue, cleanData.AlarmStatus)
 		}
 
-		// Broadcast CLEAN data via WebSocket
+		// Broadcast CLEAN data via WebSocket (with alarmstatus)
 		if w.wsHub != nil {
 			logger.GetLogger().Debugf("[BROADCAST] Broadcasting DIRECT parameter clean data: parameter_id=%d", config.IDParameter)
 			w.wsHub.BroadcastDataUpdate(cleanData)
@@ -242,7 +251,7 @@ func (w *SNMPWorker) handleError(paramID uint, paramNama, paramType string, err 
 		paramMode = domain.ParameterModeDIRECT
 	}
 
-	// CRITICAL: When device is offline, update clean cache with value=0 and status=OFFLINE
+	// CRITICAL: When device is offline, update clean cache with value=null and status=OFFLINE
 	// This ensures parameter remains visible in dashboard
 	cleanData := domain.RealtimeData{
 		ParameterID:    paramID,
@@ -250,16 +259,17 @@ func (w *SNMPWorker) handleError(paramID uint, paramNama, paramType string, err 
 		ParameterType:  paramType,
 		DeviceNama:     deviceNama,
 		RawValue:       nil,        // CLEAN data does NOT expose raw value
-		ProcessedValue: float64(0), // Force value to 0 when offline
+		ProcessedValue: nil,        // Value is null when offline
 		CustomRumus: func() *string {
 			if paramErr == nil && param.Unit != nil {
 				return param.Unit
 			}
 			return nil
 		}(),
-		Timestamp: time.Now(),
-		Status:    "offline", // Status = OFFLINE (not "error")
-		Error:     nil,       // Don't expose error message in clean data
+		Timestamp:   time.Now(),
+		Status:      "offline", // Status = OFFLINE (not "error")
+		Error:       nil,       // Don't expose error message in clean data
+		AlarmStatus: domain.AlarmStatusNormal, // Normal when offline (no value to check)
 	}
 
 	// Save RAW error state to internal cache
@@ -283,7 +293,7 @@ func (w *SNMPWorker) handleError(paramID uint, paramNama, paramType string, err 
 	if err := w.cache.Set(cleanCacheKey, cleanData, 24*time.Hour); err != nil {
 		log.Warnf("Failed to save clean offline data to cache: %v", err)
 	} else {
-		log.Infof("[OFFLINE] parameter_id=%d, parameter_nama=%s, value=0, status=offline",
+		log.Infof("[OFFLINE] parameter_id=%d, parameter_nama=%s, value=null, status=offline",
 			paramID, paramNama)
 	}
 

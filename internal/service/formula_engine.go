@@ -37,12 +37,13 @@ type WorkflowCallback func(parameterID uint, data *domain.RealtimeData)
 
 // FormulaEngine manages reactive formula evaluation
 type FormulaEngine struct {
-	formulaRepo      repository.FormulaRepository
-	paramRepo        repository.ParameterRepository
-	cache            cache.Cache
-	wsBroadcaster    WebSocketBroadcaster
-	evaluator        *FormulaEvaluator
-	workflowCallback WorkflowCallback // Callback to notify workflow engine
+	formulaRepo       repository.FormulaRepository
+	paramRepo         repository.ParameterRepository
+	cache             cache.Cache
+	wsBroadcaster     WebSocketBroadcaster
+	evaluator         *FormulaEvaluator
+	thresholdService  *ThresholdService
+	workflowCallback  WorkflowCallback // Callback to notify workflow engine
 
 	// In-memory registry
 	mu              sync.RWMutex
@@ -57,6 +58,7 @@ func NewFormulaEngine(
 	paramRepo repository.ParameterRepository,
 	cache cache.Cache,
 	wsBroadcaster WebSocketBroadcaster,
+	thresholdService *ThresholdService,
 ) *FormulaEngine {
 	return &FormulaEngine{
 		formulaRepo:      formulaRepo,
@@ -64,6 +66,7 @@ func NewFormulaEngine(
 		cache:            cache,
 		wsBroadcaster:    wsBroadcaster,
 		evaluator:        NewFormulaEvaluator(),
+		thresholdService: thresholdService,
 		workflowCallback: nil, // Set via SetWorkflowCallback
 		formulasByParam:  make(map[uint]*FormulaDefinition),
 		dependants:       make(map[uint][]uint),
@@ -441,6 +444,12 @@ func (e *FormulaEngine) evaluateFormula(formulaParamID uint, depth int) error {
 		Status:         "online",
 		Error:          nil,
 		CustomRumus:    param.Unit, // Temporary: use CustomRumus to pass unit to WebSocketHub
+		AlarmStatus:    domain.AlarmStatusNormal, // Default to normal
+	}
+
+	// Apply threshold to calculate alarm status
+	if e.thresholdService != nil {
+		e.thresholdService.ApplyThreshold(&formulaData)
 	}
 
 	// Save CLEAN data to public cache (for FORMULA results)

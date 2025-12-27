@@ -115,12 +115,14 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 	// Create DashboardData payload compatible with frontend
 	// Frontend expects: parameter_id, device_nama, parameter_nama, value, timestamp, status
 	// Convert timestamp to string format for JSON compatibility
-	// CRITICAL: Ensure value is never null - default to 0 if ProcessedValue is nil
+	// CRITICAL: When status is offline, value should be null (not 0)
 	var value interface{} = data.ProcessedValue
-	if value == nil {
+	if value == nil && data.Status != "offline" {
+		// Only default to 0 if status is not offline
 		value = float64(0)
-		log.Warnf("[BROADCAST] ProcessedValue is nil for parameter_id=%d, defaulting to 0", data.ParameterID)
+		log.Warnf("[BROADCAST] ProcessedValue is nil for parameter_id=%d (status=%s), defaulting to 0", data.ParameterID, data.Status)
 	}
+	// If status is offline and value is nil, keep it as nil (null in JSON)
 
 	// CRITICAL: Ensure status is never empty - default to "offline" if empty
 	status := data.Status
@@ -129,13 +131,21 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 		log.Warnf("[BROADCAST] Status is empty for parameter_id=%d, defaulting to 'offline'", data.ParameterID)
 	}
 
+	// CRITICAL: Ensure alarmstatus is never empty - default to "normal" if empty
+	alarmStatus := data.AlarmStatus
+	if alarmStatus == "" {
+		alarmStatus = domain.AlarmStatusNormal
+		log.Warnf("[BROADCAST] AlarmStatus is empty for parameter_id=%d, defaulting to 'normal'", data.ParameterID)
+	}
+
 	dashboardData := map[string]interface{}{
 		"parameter_id":   data.ParameterID,
 		"device_nama":    data.DeviceNama,                     // Device name
 		"parameter_nama": data.ParameterNama,                  // Logical parameter name (not raw naming)
-		"value":          value,                               // Final value (never null, defaults to 0)
+		"value":          value,                               // Final value (null when offline, otherwise actual value)
 		"timestamp":      data.Timestamp.Format(time.RFC3339), // Convert to RFC3339 string
 		"status":         status,                              // Status (never empty, defaults to "offline")
+		"alarmstatus":    alarmStatus,                          // Alarm status (never empty, defaults to "normal")
 	}
 
 	message := map[string]interface{}{
