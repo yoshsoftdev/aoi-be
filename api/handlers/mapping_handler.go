@@ -658,15 +658,24 @@ func (h *MappingHandler) Save(c *gin.Context) {
 		}()
 	}
 
-	// Collect clean parameters (DIRECT mode) - parameters that are already clean and broadcast directly
+	// Collect clean parameters - parameters that are already clean and ready to use
+	// DIRECT: already clean, broadcast directly
+	// FORMULA: result of calculation, also clean (ready to use)
+	// SOURCE: raw data, internal only, NOT included in clean_parameters
 	var cleanParameters []gin.H
 	for _, param := range createdParams {
-		if param.ParameterMode == domain.ParameterModeDIRECT {
+		if param.ParameterMode == domain.ParameterModeDIRECT || param.ParameterMode == domain.ParameterModeFORMULA {
 			cleanParameters = append(cleanParameters, gin.H{
 				"id":   param.ID,
 				"nama": param.Nama,
 			})
+			logger.GetLogger().Infof("[MAPPING] Added to clean_parameters: id=%d, nama=%s, mode=%s", 
+				param.ID, param.Nama, param.ParameterMode)
 		}
+	}
+	
+	if len(cleanParameters) == 0 {
+		logger.GetLogger().Warnf("[MAPPING] No clean parameters found (only SOURCE parameters created?)")
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
