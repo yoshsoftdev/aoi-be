@@ -50,10 +50,16 @@ func (h *ThresholdHandler) CreateOrUpdate(c *gin.Context) {
 	}
 
 	// Validate threshold_type
-	if req.ThresholdType != "" && req.ThresholdType != "max" && req.ThresholdType != "min" {
+	validTypes := map[string]bool{
+		"max":      true,
+		"min":      true,
+		"min-max":  true,
+		"abnormal": true,
+	}
+	if req.ThresholdType != "" && !validTypes[req.ThresholdType] {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
-			"error":   "threshold_type must be 'max' or 'min'",
+			"error":   "threshold_type must be 'max', 'min', 'min-max', or 'abnormal'",
 		})
 		return
 	}
@@ -280,10 +286,16 @@ func (h *ThresholdHandler) Update(c *gin.Context) {
 	}
 
 	// Validate threshold_type
-	if req.ThresholdType != "" && req.ThresholdType != "max" && req.ThresholdType != "min" {
+	validTypes := map[string]bool{
+		"max":      true,
+		"min":      true,
+		"min-max":  true,
+		"abnormal": true,
+	}
+	if req.ThresholdType != "" && !validTypes[req.ThresholdType] {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
-			"error":   "threshold_type must be 'max' or 'min'",
+			"error":   "threshold_type must be 'max', 'min', 'min-max', or 'abnormal'",
 		})
 		return
 	}
