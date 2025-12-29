@@ -13,6 +13,7 @@ type ThresholdRepository interface {
 	GetAll() ([]domain.Threshold, error)
 	Update(threshold *domain.Threshold) error
 	Delete(id uint) error
+	DeleteByParameterID(paramID uint) error // Delete by parameter ID
 	CreateOrUpdate(threshold *domain.Threshold) error // Upsert: create if not exists, update if exists
 }
 
@@ -60,6 +61,10 @@ func (r *thresholdRepository) Update(threshold *domain.Threshold) error {
 
 func (r *thresholdRepository) Delete(id uint) error {
 	return r.db.Delete(&domain.Threshold{}, id).Error
+}
+
+func (r *thresholdRepository) DeleteByParameterID(paramID uint) error {
+	return r.db.Where("id_parameter = ?", paramID).Delete(&domain.Threshold{}).Error
 }
 
 // CreateOrUpdate creates a new threshold or updates existing one based on id_parameter

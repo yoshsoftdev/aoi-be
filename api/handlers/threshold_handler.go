@@ -347,22 +347,34 @@ func (h *ThresholdHandler) Update(c *gin.Context) {
 	})
 }
 
-// Delete handles DELETE /api/tracehold/:id
+// Delete handles DELETE /api/tracehold/:parameter_id
+// Deletes threshold configuration by parameter ID
 func (h *ThresholdHandler) Delete(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	paramIDStr := c.Param("parameter_id")
+	paramID, err := strconv.ParseUint(paramIDStr, 10, 32)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
-			"error":   "Invalid ID",
+			"error":   "Invalid parameter ID",
 		})
 		return
 	}
 
-	if err := h.repo.Delete(uint(id)); err != nil {
+	// Check if threshold exists for this parameter
+	_, err = h.repo.GetByParameterID(uint(paramID))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"error":   "Threshold not found for this parameter",
+		})
+		return
+	}
+
+	if err := h.repo.DeleteByParameterID(uint(paramID)); err != nil {
+		logger.GetLogger().Errorf("Failed to delete threshold: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
-			"error":   err.Error(),
+			"error":   "Failed to delete threshold configuration",
 		})
 		return
 	}

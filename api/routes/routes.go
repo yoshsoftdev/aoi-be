@@ -168,11 +168,11 @@ func SetupRoutes(
 		thresholdHandler := handlers.NewThresholdHandler(thresholdRepo)
 		threshold := v1.Group("/tracehold")
 		{
-			threshold.POST("", thresholdHandler.CreateOrUpdate)              // POST /api/v1/tracehold (create or update by parameter_id)
-			threshold.GET("", thresholdHandler.GetAll)                       // GET /api/v1/tracehold (get all)
+			threshold.POST("", thresholdHandler.CreateOrUpdate)                // POST /api/v1/tracehold (create or update by parameter_id)
+			threshold.GET("", thresholdHandler.GetAll)                         // GET /api/v1/tracehold (get all)
 			threshold.GET("/:parameter_id", thresholdHandler.GetByParameterID) // GET /api/v1/tracehold/:parameter_id (get by parameter_id)
-			threshold.PUT("/:id", thresholdHandler.Update)                   // PUT /api/v1/tracehold/:id (update by threshold ID)
-			threshold.DELETE("/:id", thresholdHandler.Delete)                // DELETE /api/v1/tracehold/:id (delete by threshold ID)
+			threshold.PUT("/:id", thresholdHandler.Update)                     // PUT /api/v1/tracehold/:id (update by threshold ID)
+			threshold.DELETE("/:parameter_id", thresholdHandler.Delete)        // DELETE /api/v1/tracehold/:parameter_id (delete by parameter ID)
 		}
 	}
 
