@@ -6,6 +6,8 @@ import (
 	"aoi-backend/internal/core/logger"
 	"aoi-backend/internal/domain"
 	"aoi-backend/internal/scheduler"
+	"aoi-backend/internal/service"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -18,11 +20,13 @@ import (
 
 type MappingHandler struct {
 	schedulerManager *scheduler.SchedulerManager
+	formulaEngine    *service.FormulaEngine
 }
 
-func NewMappingHandler(schedulerManager *scheduler.SchedulerManager) *MappingHandler {
+func NewMappingHandler(schedulerManager *scheduler.SchedulerManager, formulaEngine *service.FormulaEngine) *MappingHandler {
 	return &MappingHandler{
 		schedulerManager: schedulerManager,
+		formulaEngine:    formulaEngine,
 	}
 }
 
@@ -52,7 +56,8 @@ type MappingData struct {
 	Quantity          *int   `json:"quantity,omitempty"`
 	DataType          string `json:"dataType,omitempty"`
 	ByteOrder         string `json:"byteOrder,omitempty"`
-	OID               string `json:"oid,omitempty"` // For SNMP
+	OID               string `json:"oid,omitempty"`            // For SNMP
+	StringMapping     string `json:"string_mapping,omitempty"` // JSON string mapping for SNMP string values
 
 	// Untuk FORMULA type
 	Formula            string            `json:"formula,omitempty"`              // Formula expression like "(Slave 1 Addr 7 + Slave 1 Addr 8) / 10"
@@ -77,6 +82,17 @@ func (h *MappingHandler) Save(c *gin.Context) {
 			"error":   err.Error(),
 		})
 		return
+	}
+
+	// Debug: Log all mappings to see if string_mapping is received
+	for i, mapping := range req.Mappings {
+		logger.GetLogger().Infof("[MAPPING] Received mapping[%d]: outputName=%s, outputType=%s, oid=%s, string_mapping='%s' (len=%d)",
+			i, mapping.OutputName, mapping.OutputType, mapping.OID, mapping.StringMapping, len(mapping.StringMapping))
+		if mapping.StringMapping != "" {
+			logger.GetLogger().Infof("[MAPPING] ✅ Found string_mapping for mapping[%d] '%s': %s", i, mapping.OutputName, mapping.StringMapping)
+		} else {
+			logger.GetLogger().Warnf("[MAPPING] ⚠️ No string_mapping for mapping[%d] '%s'", i, mapping.OutputName)
+		}
 	}
 
 	// Validate request
@@ -170,20 +186,129 @@ func (h *MappingHandler) Save(c *gin.Context) {
 	var sourceMappings []MappingData // Dependencies for FORMULA (should be SOURCE)
 
 	// First pass: Identify which DIRECT mappings are dependencies for FORMULA
-	// Collect all parameter names that will be referenced by FORMULA
+	// Also detect OID references in FORMULA and auto-create SOURCE parameters
 	formulaDependencyNames := make(map[string]bool)
-	for _, mapping := range req.Mappings {
+	oidToSourceMapping := make(map[string]MappingData) // Map OID -> SOURCE mapping to create
+
+	logger.GetLogger().Infof("[MAPPING] Analyzing %d mappings to find FORMULA dependencies...", len(req.Mappings))
+	for idx := range req.Mappings {
+		mapping := &req.Mappings[idx] // Use pointer to modify original
+		logger.GetLogger().Infof("[MAPPING] [%d/%d] Mapping: outputName=%s, outputType=%s", idx+1, len(req.Mappings), mapping.OutputName, mapping.OutputType)
 		if mapping.OutputType == "FORMULA" {
-			// Extract parameter names from variables
-			for _, v := range mapping.Variables {
+			logger.GetLogger().Infof("[MAPPING] Found FORMULA mapping: name=%s, variables_count=%d, formula='%s', expression='%s'",
+				mapping.OutputName, len(mapping.Variables), mapping.Formula, mapping.Expression)
+
+			// If no variables provided, try to extract OID references from formula/expression
+			if len(mapping.Variables) == 0 {
+				formulaText := mapping.Expression
+				if formulaText == "" {
+					formulaText = mapping.Formula
+				}
+
+				if formulaText != "" {
+					logger.GetLogger().Infof("[MAPPING] No variables provided, attempting to extract OID references from formula: '%s'", formulaText)
+
+					// Extract OID references (pattern: "OID .1.3.6.1.4.1.16010.1.1.1.5.0" or "OID .1.3.6.1.4.1.16010.1.1.1.5.0 /10")
+					oidPattern := regexp.MustCompile(`(?i)OID\s+([\.\d]+)`)
+					oidMatches := oidPattern.FindAllStringSubmatch(formulaText, -1)
+
+					if len(oidMatches) > 0 {
+						logger.GetLogger().Infof("[MAPPING] Found %d OID references in formula", len(oidMatches))
+
+						// Generate variables and SOURCE mappings for each OID
+						varName := 'a'
+						for _, oidMatch := range oidMatches {
+							oid := oidMatch[1]
+							varNameStr := string(varName)
+
+							logger.GetLogger().Infof("[MAPPING]   OID: %s → variable '%s'", oid, varNameStr)
+
+							// Check if we already have a SOURCE mapping for this OID
+							if _, exists := oidToSourceMapping[oid]; !exists {
+								// Create SOURCE mapping for this OID
+								sourceMapping := MappingData{
+									OutputType: "DIRECT",                      // Will be converted to SOURCE
+									OutputName: fmt.Sprintf("SOURCE_%s", oid), // Auto-generated name
+									OID:        oid,
+								}
+								oidToSourceMapping[oid] = sourceMapping
+								formulaDependencyNames[sourceMapping.OutputName] = true
+								logger.GetLogger().Infof("[MAPPING]   Created SOURCE mapping for OID %s: name=%s", oid, sourceMapping.OutputName)
+							} else {
+								// Use existing SOURCE mapping
+								existingMapping := oidToSourceMapping[oid]
+								formulaDependencyNames[existingMapping.OutputName] = true
+								logger.GetLogger().Infof("[MAPPING]   Reusing existing SOURCE mapping for OID %s: name=%s", oid, existingMapping.OutputName)
+							}
+
+							varName++
+						}
+
+						// Auto-generate variables for the FORMULA mapping
+						varName = 'a'
+						for _, oidMatch := range oidMatches {
+							oid := oidMatch[1]
+							varNameStr := string(varName)
+
+							// Get the SOURCE mapping name for this OID
+							sourceMapping := oidToSourceMapping[oid]
+
+							// Add variable to mapping
+							mapping.Variables = append(mapping.Variables, FormulaVariable{
+								Name:                varNameStr,
+								SourceParameterName: sourceMapping.OutputName,
+							})
+
+							logger.GetLogger().Infof("[MAPPING]   Generated variable '%s' → SOURCE parameter '%s' (OID: %s)",
+								varNameStr, sourceMapping.OutputName, oid)
+
+							varName++
+						}
+
+						// Normalize expression: replace "OID .1.3.6.1.4.1.16010.1.1.1.5.0" with variable name
+						varName = 'a'
+						normalizedExpression := formulaText
+						for _, oidMatch := range oidMatches {
+							oid := oidMatch[1]
+							varNameStr := string(varName)
+
+							// Replace "OID <oid>" with variable name
+							oidPattern := regexp.MustCompile(fmt.Sprintf(`(?i)OID\s+%s`, regexp.QuoteMeta(oid)))
+							normalizedExpression = oidPattern.ReplaceAllString(normalizedExpression, varNameStr)
+
+							varName++
+						}
+
+						// Update mapping with normalized expression and variables
+						mapping.Expression = normalizedExpression
+						logger.GetLogger().Infof("[MAPPING]   Normalized expression: '%s' → '%s'", formulaText, normalizedExpression)
+					} else {
+						logger.GetLogger().Warnf("[MAPPING] ⚠️ FORMULA '%s' has no variables and no OID references found in formula", mapping.OutputName)
+					}
+				}
+			}
+
+			// Extract parameter names from variables (after auto-generation)
+			for varIdx, v := range mapping.Variables {
+				logger.GetLogger().Infof("[MAPPING]   Variable[%d]: name=%s, source_parameter_name='%s', source_parameter_id=%v",
+					varIdx+1, v.Name, v.SourceParameterName, v.SourceParameterID)
 				if v.SourceParameterName != "" {
 					formulaDependencyNames[v.SourceParameterName] = true
-					logger.GetLogger().Debugf("FORMULA '%s' depends on parameter '%s'", mapping.OutputName, v.SourceParameterName)
+					logger.GetLogger().Infof("[MAPPING] ✅ FORMULA '%s' depends on parameter '%s'", mapping.OutputName, v.SourceParameterName)
+				} else if v.SourceParameterID != nil {
+					logger.GetLogger().Warnf("[MAPPING] ⚠️ FORMULA '%s' variable '%s' uses source_parameter_id=%d (not name), cannot auto-create SOURCE",
+						mapping.OutputName, v.Name, *v.SourceParameterID)
 				}
 			}
 		}
 	}
-	logger.GetLogger().Infof("Found %d FORMULA dependencies: %v", len(formulaDependencyNames), formulaDependencyNames)
+	logger.GetLogger().Infof("[MAPPING] Found %d FORMULA dependencies (by name): %v", len(formulaDependencyNames), formulaDependencyNames)
+
+	// Add auto-generated SOURCE mappings to sourceMappings
+	for oid, sourceMapping := range oidToSourceMapping {
+		logger.GetLogger().Infof("[MAPPING] Adding auto-generated SOURCE mapping for OID %s: name=%s", oid, sourceMapping.OutputName)
+		sourceMappings = append(sourceMappings, sourceMapping)
+	}
 
 	// Validate all mappings first
 	for _, mapping := range req.Mappings {
@@ -221,11 +346,11 @@ func (h *MappingHandler) Save(c *gin.Context) {
 			if formulaDependencyNames[mapping.OutputName] {
 				// This is a SOURCE parameter (dependency for FORMULA)
 				sourceMappings = append(sourceMappings, mapping)
-				logger.GetLogger().Infof("DIRECT parameter '%s' is a FORMULA dependency → will be created as SOURCE", mapping.OutputName)
+				logger.GetLogger().Infof("[MAPPING] ✅ DIRECT parameter '%s' is a FORMULA dependency → will be created as SOURCE", mapping.OutputName)
 			} else {
 				// This is a standalone DIRECT parameter
 				directMappings = append(directMappings, mapping)
-				logger.GetLogger().Infof("DIRECT parameter '%s' is standalone → will be created as DIRECT", mapping.OutputName)
+				logger.GetLogger().Infof("[MAPPING] DIRECT parameter '%s' is standalone → will be created as DIRECT", mapping.OutputName)
 			}
 		}
 
@@ -244,7 +369,11 @@ func (h *MappingHandler) Save(c *gin.Context) {
 	}
 
 	// Phase 1a: Create SOURCE parameters first (dependencies for FORMULA - internal only)
-	for _, mapping := range sourceMappings {
+	logger.GetLogger().Infof("[MAPPING] Phase 1a: Creating %d SOURCE parameters (FORMULA dependencies)", len(sourceMappings))
+	for idx, mapping := range sourceMappings {
+		logger.GetLogger().Infof("[MAPPING] [%d/%d] Processing SOURCE mapping: name=%s, oid=%s, type=%s",
+			idx+1, len(sourceMappings), mapping.OutputName, mapping.OID, koneksiType)
+
 		// Create SOURCE parameter (internal only, not broadcast)
 		param := &domain.Parameter{
 			DeviceID:      koneksi.ID,
@@ -255,7 +384,11 @@ func (h *MappingHandler) Save(c *gin.Context) {
 			ParameterMode: domain.ParameterModeSOURCE, // SOURCE = polling device, internal only, tidak dibroadcast
 		}
 
+		logger.GetLogger().Infof("[MAPPING] Creating SOURCE parameter: name=%s, device_id=%d, type=%s, mode=SOURCE",
+			param.Nama, param.DeviceID, param.Type)
+
 		if err := tx.Create(param).Error; err != nil {
+			logger.GetLogger().Errorf("[MAPPING] ❌ Failed to create SOURCE parameter: %v", err)
 			tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"success": false,
@@ -264,8 +397,13 @@ func (h *MappingHandler) Save(c *gin.Context) {
 			return
 		}
 
+		logger.GetLogger().Infof("[MAPPING] ✅ SOURCE parameter created: id=%d, name=%s", param.ID, param.Nama)
+
 		// Create protocol-specific config
+		logger.GetLogger().Infof("[MAPPING] Creating protocol config for SOURCE parameter: id=%d, name=%s, type=%s, oid=%s",
+			param.ID, param.Nama, koneksiType, mapping.OID)
 		if err := createProtocolConfig(tx, param, koneksiType, mapping, req.Connection.Config); err != nil {
+			logger.GetLogger().Errorf("[MAPPING] ❌ Failed to create protocol config for SOURCE parameter %d: %v", param.ID, err)
 			tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"success": false,
@@ -273,15 +411,25 @@ func (h *MappingHandler) Save(c *gin.Context) {
 			})
 			return
 		}
+		logger.GetLogger().Infof("[MAPPING] ✅ Protocol config created successfully for SOURCE parameter: id=%d, name=%s", param.ID, param.Nama)
 
 		// Store mapping for formula reference
 		paramNameToID[mapping.OutputName] = param.ID
 		createdParams = append(createdParams, *param)
-		logger.GetLogger().Infof("Created SOURCE parameter (FORMULA dependency): id=%d, name=%s", param.ID, param.Nama)
+		logger.GetLogger().Infof("[MAPPING] ✅ Created SOURCE parameter (FORMULA dependency): id=%d, name=%s, type=%s", param.ID, param.Nama, koneksiType)
+	}
+
+	if len(sourceMappings) == 0 {
+		logger.GetLogger().Infof("[MAPPING] No SOURCE parameters to create (no FORMULA dependencies)")
 	}
 
 	// Phase 1b: Create DIRECT parameters (standalone, broadcast directly)
 	for _, mapping := range directMappings {
+		// Debug: Log string_mapping if provided
+		if mapping.StringMapping != "" {
+			logger.GetLogger().Infof("[MAPPING] Creating DIRECT parameter '%s' with string_mapping: %s", mapping.OutputName, mapping.StringMapping)
+		}
+
 		// Create DIRECT parameter
 		param := &domain.Parameter{
 			DeviceID:      koneksi.ID,
@@ -302,7 +450,9 @@ func (h *MappingHandler) Save(c *gin.Context) {
 		}
 
 		// Create protocol-specific config
+		logger.GetLogger().Infof("[MAPPING] Creating protocol config for DIRECT parameter: id=%d, name=%s, type=%s", param.ID, param.Nama, koneksiType)
 		if err := createProtocolConfig(tx, param, koneksiType, mapping, req.Connection.Config); err != nil {
+			logger.GetLogger().Errorf("[MAPPING] ❌ Failed to create protocol config for DIRECT parameter %d: %v", param.ID, err)
 			tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"success": false,
@@ -310,6 +460,7 @@ func (h *MappingHandler) Save(c *gin.Context) {
 			})
 			return
 		}
+		logger.GetLogger().Infof("[MAPPING] ✅ Protocol config created successfully for DIRECT parameter: id=%d, name=%s", param.ID, param.Nama)
 
 		// Store mapping for formula reference
 		paramNameToID[mapping.OutputName] = param.ID
@@ -318,16 +469,21 @@ func (h *MappingHandler) Save(c *gin.Context) {
 	}
 
 	// Phase 2: Create FORMULA parameters
-	for _, mapping := range formulaMappings {
+	for idx, mapping := range formulaMappings {
+		logger.GetLogger().Infof("[MAPPING] Processing FORMULA mapping [%d/%d]: name=%s, expression='%s', formula='%s', variables_count=%d",
+			idx+1, len(formulaMappings), mapping.OutputName, mapping.Expression, mapping.Formula, len(mapping.Variables))
+
 		// Use expression if provided, otherwise use formula
 		expression := mapping.Expression
 		if expression == "" && mapping.Formula != "" {
 			// If expression is not provided but formula is, use formula as expression
 			// This handles cases where frontend sends formula but backend expects expression
 			expression = mapping.Formula
+			logger.GetLogger().Infof("[MAPPING] Using formula as expression: '%s'", expression)
 		}
 
 		if expression == "" {
+			logger.GetLogger().Errorf("[MAPPING] ❌ Expression is empty for FORMULA parameter '%s'", mapping.OutputName)
 			tx.Rollback()
 			c.JSON(http.StatusBadRequest, gin.H{
 				"success": false,
@@ -335,6 +491,8 @@ func (h *MappingHandler) Save(c *gin.Context) {
 			})
 			return
 		}
+
+		logger.GetLogger().Infof("[MAPPING] Final expression for FORMULA parameter '%s': '%s'", mapping.OutputName, expression)
 
 		// Variables are required if formula contains field references
 		// If variables are not provided, try to extract from formula
@@ -403,6 +561,7 @@ func (h *MappingHandler) Save(c *gin.Context) {
 		}
 
 		// Create parameter_formula_var entries (if variables exist)
+		logger.GetLogger().Infof("[MAPPING] Creating %d formula variables for parameter_id=%d", len(varMappings), param.ID)
 		for varName, sourceParamID := range varMappings {
 			formulaVar := &domain.ParameterFormulaVar{
 				FormulaID:         formula.ID,
@@ -410,7 +569,11 @@ func (h *MappingHandler) Save(c *gin.Context) {
 				SourceParameterID: sourceParamID,
 			}
 
+			logger.GetLogger().Infof("[MAPPING] Creating formula variable: formula_id=%d, var_name='%s', source_parameter_id=%d",
+				formula.ID, varName, sourceParamID)
+
 			if err := tx.Create(formulaVar).Error; err != nil {
+				logger.GetLogger().Errorf("[MAPPING] ❌ Failed to create formula variable: %v", err)
 				tx.Rollback()
 				c.JSON(http.StatusInternalServerError, gin.H{
 					"success": false,
@@ -418,6 +581,13 @@ func (h *MappingHandler) Save(c *gin.Context) {
 				})
 				return
 			}
+
+			logger.GetLogger().Infof("[MAPPING] ✅ Created formula variable: id=%d, var_name='%s', source_parameter_id=%d",
+				formulaVar.ID, varName, sourceParamID)
+		}
+
+		if len(varMappings) == 0 {
+			logger.GetLogger().Warnf("[MAPPING] ⚠️ No formula variables created for parameter_id=%d (expression='%s')", param.ID, expression)
 		}
 
 		createdParams = append(createdParams, *param)
@@ -425,21 +595,57 @@ func (h *MappingHandler) Save(c *gin.Context) {
 	}
 
 	// Commit transaction
+	logger.GetLogger().Infof("[MAPPING] Committing transaction: %d parameters created (%d SOURCE, %d DIRECT, %d FORMULA)",
+		len(createdParams), len(sourceMappings), len(directMappings), len(formulaMappings))
 	if err := tx.Commit().Error; err != nil {
+		logger.GetLogger().Errorf("[MAPPING] ❌ Failed to commit transaction: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"error":   "Failed to commit transaction: " + err.Error(),
 		})
 		return
 	}
+	logger.GetLogger().Infof("[MAPPING] ✅ Transaction committed successfully")
+
+	// Log summary of created parameters
+	if len(sourceMappings) > 0 {
+		logger.GetLogger().Infof("[MAPPING] Summary: Created %d SOURCE parameters (should have SNMP config)", len(sourceMappings))
+		for _, mapping := range sourceMappings {
+			if paramID, exists := paramNameToID[mapping.OutputName]; exists {
+				logger.GetLogger().Infof("[MAPPING]   - SOURCE parameter '%s' (id=%d) should have SNMP config",
+					mapping.OutputName, paramID)
+			} else {
+				logger.GetLogger().Errorf("[MAPPING] ❌ SOURCE parameter '%s' not found in paramNameToID map!", mapping.OutputName)
+			}
+		}
+	}
 
 	// Reload scheduler to pick up new parameters
 	if h.schedulerManager != nil {
-		logger.GetLogger().Info("Reloading scheduler after mapping save")
+		logger.GetLogger().Info("[MAPPING] Reloading scheduler after mapping save")
 		h.schedulerManager.Reload()
+	}
 
-		// Trigger immediate execution for newly created parameters
-		// This ensures data appears in dashboard immediately
+	// Reload formula engine to pick up new formulas
+	if h.formulaEngine != nil {
+		logger.GetLogger().Info("[MAPPING] Reloading formula engine after mapping save")
+		if err := h.formulaEngine.LoadAll(); err != nil {
+			logger.GetLogger().Warnf("[MAPPING] Failed to reload formula engine: %v", err)
+		} else {
+			logger.GetLogger().Info("[MAPPING] Formula engine reloaded successfully")
+			// Evaluate all formulas after reload to ensure all appear in dashboard
+			go func() {
+				// Wait a bit for cache to be ready
+				time.Sleep(500 * time.Millisecond)
+				logger.GetLogger().Info("[MAPPING] Evaluating all formulas after reload")
+				h.formulaEngine.EvaluateAll()
+			}()
+		}
+	}
+
+	// Trigger immediate execution for newly created parameters
+	// This ensures data appears in dashboard immediately
+	if h.schedulerManager != nil {
 		go func() {
 			// Wait a bit for scheduler to finish reloading
 			time.Sleep(200 * time.Millisecond)
@@ -711,8 +917,68 @@ func createProtocolConfig(tx *gorm.DB, param *domain.Parameter, paramType string
 			PollingMs:   pollingMs,
 		}
 
+		// Add string mapping if provided (for SNMP string values)
+		// CRITICAL: Always save string_mapping if provided
+		// Check both empty string and nil to ensure we capture all cases
+		logger.GetLogger().Infof("[MAPPING] Processing SNMP config for parameter_id=%d, mapping.StringMapping='%s' (raw, len=%d)",
+			param.ID, mapping.StringMapping, len(mapping.StringMapping))
+
+		stringMappingValue := strings.TrimSpace(mapping.StringMapping)
+		logger.GetLogger().Infof("[MAPPING] After TrimSpace: stringMappingValue='%s' (len=%d)", stringMappingValue, len(stringMappingValue))
+
+		if stringMappingValue != "" {
+			// Validate JSON format before saving
+			var testMap map[string]interface{}
+			if err := json.Unmarshal([]byte(stringMappingValue), &testMap); err != nil {
+				logger.GetLogger().Errorf("[MAPPING] Invalid JSON format for string_mapping (parameter_id=%d): %s, error: %v", param.ID, stringMappingValue, err)
+				return fmt.Errorf("invalid string_mapping JSON format: %w", err)
+			}
+
+			// CRITICAL: Set pointer to stringMappingValue
+			snmpConfig.StringMapping = &stringMappingValue
+			logger.GetLogger().Infof("[MAPPING] Set snmpConfig.StringMapping pointer: %p, value: '%s'", snmpConfig.StringMapping, *snmpConfig.StringMapping)
+		} else {
+			logger.GetLogger().Warnf("[MAPPING] No string_mapping provided for SNMP parameter_id=%d (OID=%s, OutputName=%s, raw='%s')",
+				param.ID, mapping.OID, mapping.OutputName, mapping.StringMapping)
+		}
+
+		// Log before create
+		if snmpConfig.StringMapping != nil {
+			logger.GetLogger().Infof("[MAPPING] Before Create: snmpConfig.StringMapping=%p, value='%s'", snmpConfig.StringMapping, *snmpConfig.StringMapping)
+		} else {
+			logger.GetLogger().Warnf("[MAPPING] Before Create: snmpConfig.StringMapping is NULL!")
+		}
+
+		// Log SNMP config details before create
+		logger.GetLogger().Infof("[MAPPING] Creating SNMP config: parameter_id=%d, oid=%s, ip=%s, port=%d, polling_ms=%d, string_mapping=%v",
+			snmpConfig.IDParameter, snmpConfig.OID, snmpConfig.IPAddress, snmpConfig.Port, snmpConfig.PollingMs,
+			func() string {
+				if snmpConfig.StringMapping != nil {
+					return *snmpConfig.StringMapping
+				}
+				return "NULL"
+			}())
+
 		if err := tx.Create(snmpConfig).Error; err != nil {
-			return err
+			logger.GetLogger().Errorf("[MAPPING] ❌ Failed to create SNMP config for parameter_id=%d: %v", param.ID, err)
+			return fmt.Errorf("failed to create SNMP config: %w", err)
+		}
+
+		logger.GetLogger().Infof("[MAPPING] ✅ SNMP config created with ID=%d for parameter_id=%d", snmpConfig.ID, param.ID)
+
+		// Verify SNMP config was saved by querying back from database
+		var savedConfig domain.SNMPConfig
+		if err := tx.First(&savedConfig, snmpConfig.ID).Error; err == nil {
+			logger.GetLogger().Infof("[MAPPING] ✅ Verified SNMP config exists in DB: id=%d, parameter_id=%d, oid=%s",
+				savedConfig.ID, savedConfig.IDParameter, savedConfig.OID)
+			if savedConfig.StringMapping != nil && *savedConfig.StringMapping != "" {
+				logger.GetLogger().Infof("[MAPPING] ✅ SNMP config created successfully for parameter_id=%d with string_mapping: %s", param.ID, *savedConfig.StringMapping)
+			} else {
+				logger.GetLogger().Warnf("[MAPPING] ⚠️ SNMP config created for parameter_id=%d but string_mapping is NULL or empty (ID=%d)", param.ID, savedConfig.ID)
+			}
+		} else {
+			logger.GetLogger().Errorf("[MAPPING] ❌ Failed to verify SNMP config after create: %v", err)
+			return fmt.Errorf("failed to verify SNMP config after create: %w", err)
 		}
 
 		// TODO: Add support for digital_input, digital_output, analog_input, analog_output

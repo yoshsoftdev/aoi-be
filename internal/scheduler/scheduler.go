@@ -247,25 +247,34 @@ func (s *SchedulerManager) loadAndScheduleAll() {
 		Where("(parameters.parameter_mode = ? OR parameters.parameter_mode = ? OR (parameters.parameter_mode = '' OR parameters.parameter_mode IS NULL))", domain.ParameterModeSOURCE, domain.ParameterModeDIRECT).
 		Find(&snmpConfigs)
 
-	for _, config := range snmpConfigs {
+	log.Infof("[SCHEDULER] ===== QUERY RESULT: SNMP Configs =====")
+	log.Infof("[SCHEDULER] Total SNMP configs found: %d", len(snmpConfigs))
+
+	for idx, config := range snmpConfigs {
 		// Default to SOURCE if parameter_mode is empty/null
 		paramMode := config.Parameter.ParameterMode
 		if paramMode == "" {
 			paramMode = domain.ParameterModeSOURCE
 		}
 
+		log.Infof("[SCHEDULER]   [%d] Config ID: %d, Parameter ID: %d, Parameter Name: %s, Direction: %s, Mode: %s, Device ID: %d",
+			idx+1, config.ID, config.IDParameter, config.Parameter.Nama, config.Parameter.Direction, paramMode, config.Parameter.DeviceID)
+
 		// GUARD: Skip WRITE parameters
 		if config.Parameter.Direction == "WRITE" {
-			log.Warnf("[SCHEDULER] ⚠️  Skipping WRITE parameter: Config ID=%d, Parameter ID=%d", config.ID, config.IDParameter)
+			log.Warnf("[SCHEDULER]   [%d] ⚠️  Skipping WRITE parameter: Config ID=%d, Parameter ID=%d", idx+1, config.ID, config.IDParameter)
 			continue
 		}
 
 		// GUARD: Only poll SOURCE & DIRECT
 		if paramMode != domain.ParameterModeSOURCE && paramMode != domain.ParameterModeDIRECT {
-			log.Warnf("[SCHEDULER] ⚠️  Skipping non-pollable parameter (Mode=%s): Config ID=%d, Parameter ID=%d", paramMode, config.ID, config.IDParameter)
+			log.Warnf("[SCHEDULER]   [%d] ⚠️  Skipping non-pollable parameter (Mode=%s): Config ID=%d, Parameter ID=%d. Only SOURCE and DIRECT are polled.", idx+1, paramMode, config.ID, config.IDParameter)
 			continue
 		}
+
 		pollingMs := s.getPollingMs(&config.PollingMs, &config.Parameter)
+		log.Infof("[SCHEDULER]   [%d] PollingMs: %d (config=%d, device=%d)", idx+1, pollingMs, config.PollingMs, config.Parameter.Device.PollingMs)
+
 		if pollingMs > 0 {
 			// CRITICAL FIX: Capture config.ID in local variable to avoid closure issue
 			configID := config.ID
@@ -280,8 +289,14 @@ func (s *SchedulerManager) loadAndScheduleAll() {
 					return s.snmpWorker.Execute(ctx, configID)
 				},
 			})
+			log.Infof("[SCHEDULER]   [%d] ✅ Added to pollingJobs: Parameter ID=%d, Connection ID=%d, Config ID=%d (captured)", idx+1, config.IDParameter, config.Parameter.DeviceID, configID)
+		} else {
+			log.Warnf("[SCHEDULER]   [%d] ⚠️  Skipping (pollingMs=0): Config ID=%d, Parameter ID=%d", idx+1, config.ID, config.IDParameter)
 		}
 	}
+
+	log.Infof("[SCHEDULER] ===== END QUERY RESULT: SNMP =====")
+	log.Infof("[SCHEDULER] Total pollingJobs after SNMP: %d", len(pollingJobs))
 
 	// Group jobs by connection
 	log.Infof("[SCHEDULER] ===== GROUPING JOBS BY CONNECTION =====")

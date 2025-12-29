@@ -215,6 +215,7 @@ func main() {
 		schedulerManager,
 		workflowRepo,
 		workflowEngine,
+		formulaEngine,
 	)
 	log.Info("Routes configured successfully")
 

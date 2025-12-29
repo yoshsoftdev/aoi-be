@@ -3,7 +3,10 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"aoi-backend/internal/core/logger"
@@ -432,9 +435,44 @@ func (h *ModbusHandler) TestConnection(c *gin.Context) {
 			return
 		}
 
+		// CRITICAL: If rawValue is string, try to convert to numeric
+		// This ensures that numeric strings like "229.60" are returned as numbers, not strings
+		var processedValue interface{} = rawValue
+		if strValue, ok := rawValue.(string); ok {
+			log.Debugf("[SNMP TEST] Received string value '%s' (type: string, len: %d)", strValue, len(strValue))
+			
+			// Trim whitespace first
+			trimmedValue := strings.TrimSpace(strValue)
+			if trimmedValue != strValue {
+				log.Debugf("[SNMP TEST] Trimmed string from '%s' to '%s'", strValue, trimmedValue)
+			}
+			
+			// Try to parse as number (float64 handles both int and float)
+			parsedFloat, err := strconv.ParseFloat(trimmedValue, 64)
+			if err == nil && !math.IsNaN(parsedFloat) && !math.IsInf(parsedFloat, 0) {
+				// Check if it's a whole number (int) or has decimal (float)
+				if parsedFloat == float64(int64(parsedFloat)) {
+					// It's a whole number, use int64 for cleaner representation
+					processedValue = int64(parsedFloat)
+					log.Infof("[SNMP TEST] Converted string '%s' to integer %d (numeric)", strValue, int64(parsedFloat))
+				} else {
+					// It has decimal places, use float64
+					processedValue = parsedFloat
+					log.Infof("[SNMP TEST] Converted string '%s' to float %.2f (numeric)", strValue, parsedFloat)
+				}
+			} else {
+				// Cannot parse as number, keep as string (will require string mapping)
+				processedValue = strValue
+				log.Debugf("[SNMP TEST] String '%s' cannot be parsed as number (error: %v), keeping as string (requires mapping)", strValue, err)
+			}
+		} else {
+			// Already numeric or other type, use as-is
+			log.Debugf("[SNMP TEST] Raw value is not string (type: %T), using as-is", rawValue)
+		}
+
 		response = TestConnectionResponse{
 			Connected: true,
-			RawValue:  rawValue,
+			RawValue:  processedValue, // Use processed value (numeric if convertible, string otherwise)
 			Message:   "Connection successful",
 		}
 

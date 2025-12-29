@@ -26,6 +26,7 @@ func SetupRoutes(
 	schedulerManager *scheduler.SchedulerManager,
 	workflowRepo repository.WorkflowRepository,
 	workflowEngine *service.WorkflowEngine,
+	formulaEngine *service.FormulaEngine,
 ) *gin.Engine {
 	router := gin.Default()
 
@@ -66,14 +67,7 @@ func SetupRoutes(
 		presetRepo := repository.NewPresetRepository()
 		deviceRepo := repository.NewDeviceRepository()
 		thresholdRepo := repository.NewThresholdRepository()
-		thresholdService := service.NewThresholdService(thresholdRepo)
-		formulaEngine := service.NewFormulaEngine(
-			repository.NewFormulaRepository(),
-			paramRepo,
-			cache,
-			wsHub,
-			thresholdService,
-		)
+		// Use the shared formulaEngine instance (passed from main.go)
 		writeService := service.NewWriteService(
 			paramRepo,
 			presetRepo,
@@ -140,7 +134,8 @@ func SetupRoutes(
 		v1.GET("/ws", wsHandler.Handle)
 
 		// Mapping
-		mappingHandler := handlers.NewMappingHandler(schedulerManager)
+		// Use the shared formulaEngine instance (passed from main.go)
+		mappingHandler := handlers.NewMappingHandler(schedulerManager, formulaEngine)
 		mapping := v1.Group("/mapping")
 		{
 			mapping.POST("/save", mappingHandler.Save)

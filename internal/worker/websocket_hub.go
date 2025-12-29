@@ -2,6 +2,7 @@ package worker
 
 import (
 	"encoding/json"
+	"strconv"
 	"sync"
 	"time"
 
@@ -116,7 +117,23 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 	// Frontend expects: parameter_id, device_nama, parameter_nama, value, timestamp, status
 	// Convert timestamp to string format for JSON compatibility
 	// CRITICAL: When status is offline, value should be null (not 0)
+	// CRITICAL: Value must ALWAYS be numeric (never string) for broadcast
 	var value interface{} = data.ProcessedValue
+
+	// Convert string to numeric if somehow ProcessedValue is still string
+	if strVal, ok := value.(string); ok {
+		log.Warnf("[BROADCAST] ProcessedValue is string '%s' for parameter_id=%d, attempting to convert to numeric", strVal, data.ParameterID)
+		// Try to parse as number
+		if parsedNum, err := strconv.ParseFloat(strVal, 64); err == nil {
+			value = parsedNum
+			log.Infof("[BROADCAST] Converted string '%s' to numeric %.2f for parameter_id=%d", strVal, parsedNum, data.ParameterID)
+		} else {
+			// Cannot parse, default to 0
+			value = float64(0)
+			log.Warnf("[BROADCAST] Cannot parse string '%s' to numeric for parameter_id=%d, defaulting to 0", strVal, data.ParameterID)
+		}
+	}
+
 	if value == nil && data.Status != "offline" {
 		// Only default to 0 if status is not offline
 		value = float64(0)
@@ -138,14 +155,27 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 		log.Warnf("[BROADCAST] AlarmStatus is empty for parameter_id=%d, defaulting to 'normal'", data.ParameterID)
 	}
 
+	// CRITICAL: Final validation - value must be numeric (never string)
+	// Double check to ensure no string slips through
+	var finalValue interface{} = value
+	if strVal, ok := value.(string); ok {
+		log.Errorf("[BROADCAST] CRITICAL: Value is still string '%s' for parameter_id=%d after conversion attempt, forcing to 0", strVal, data.ParameterID)
+		finalValue = float64(0)
+	} else {
+		finalValue = value
+	}
+
+	// Log final value type for debugging
+	log.Debugf("[BROADCAST] Parameter %d: Final value type=%T, value=%v", data.ParameterID, finalValue, finalValue)
+
 	dashboardData := map[string]interface{}{
 		"parameter_id":   data.ParameterID,
 		"device_nama":    data.DeviceNama,                     // Device name
 		"parameter_nama": data.ParameterNama,                  // Logical parameter name (not raw naming)
-		"value":          value,                               // Final value (null when offline, otherwise actual value)
+		"value":          finalValue,                          // Final value (ALWAYS numeric, never string)
 		"timestamp":      data.Timestamp.Format(time.RFC3339), // Convert to RFC3339 string
 		"status":         status,                              // Status (never empty, defaults to "offline")
-		"alarmstatus":    alarmStatus,                          // Alarm status (never empty, defaults to "normal")
+		"alarmstatus":    alarmStatus,                         // Alarm status (never empty, defaults to "normal")
 	}
 
 	message := map[string]interface{}{
