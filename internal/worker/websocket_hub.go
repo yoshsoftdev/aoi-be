@@ -2,6 +2,7 @@ package worker
 
 import (
 	"encoding/json"
+	"math"
 	"strconv"
 	"sync"
 	"time"
@@ -165,14 +166,45 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 		finalValue = value
 	}
 
+	// Round value to 2 decimal places if it's a float
+	// Convert to float64, round to 2 decimals, then convert back to appropriate type
+	var roundedValue interface{} = finalValue
+	if finalValue != nil && data.Status != "offline" {
+		switch v := finalValue.(type) {
+		case float64:
+			// Round to 2 decimal places
+			roundedValue = math.Round(v*100) / 100
+			log.Debugf("[BROADCAST] Parameter %d: Rounded value from %.10f to %.2f", data.ParameterID, v, roundedValue)
+		case float32:
+			// Round to 2 decimal places
+			roundedValue = float32(math.Round(float64(v)*100) / 100)
+			log.Debugf("[BROADCAST] Parameter %d: Rounded value from %.10f to %.2f", data.ParameterID, v, roundedValue)
+		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+			// Integer values don't need rounding, keep as is
+			roundedValue = finalValue
+		default:
+			// For other types, try to convert to float64 and round
+			if numVal, ok := convertToFloat64(finalValue); ok {
+				roundedValue = math.Round(numVal*100) / 100
+				log.Debugf("[BROADCAST] Parameter %d: Converted and rounded value from %v to %.2f", data.ParameterID, finalValue, roundedValue)
+			} else {
+				// Cannot convert, keep original
+				roundedValue = finalValue
+			}
+		}
+	} else {
+		// Keep nil for offline status
+		roundedValue = finalValue
+	}
+
 	// Log final value type for debugging
-	log.Debugf("[BROADCAST] Parameter %d: Final value type=%T, value=%v", data.ParameterID, finalValue, finalValue)
+	log.Debugf("[BROADCAST] Parameter %d: Final value type=%T, value=%v (rounded)", data.ParameterID, roundedValue, roundedValue)
 
 	dashboardData := map[string]interface{}{
 		"parameter_id":   data.ParameterID,
 		"device_nama":    data.DeviceNama,                     // Device name
 		"parameter_nama": data.ParameterNama,                  // Logical parameter name (not raw naming)
-		"value":          finalValue,                          // Final value (ALWAYS numeric, never string)
+		"value":          roundedValue,                         // Final value (ALWAYS numeric, never string, rounded to 2 decimals)
 		"timestamp":      data.Timestamp.Format(time.RFC3339), // Convert to RFC3339 string
 		"status":         status,                              // Status (never empty, defaults to "offline")
 		"alarmstatus":    alarmStatus,                         // Alarm status (never empty, defaults to "normal")
@@ -259,4 +291,36 @@ func (h *WebSocketHub) BroadcastAlarm(workflowID uint, workflowName string, mess
 
 	log.Debugf("[BROADCAST] Queuing alarm message: %d bytes, workflow_id=%d", len(bytes), workflowID)
 	h.broadcast <- bytes
+}
+
+// convertToFloat64 attempts to convert various numeric types to float64
+func convertToFloat64(value interface{}) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int8:
+		return float64(v), true
+	case int16:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case uint:
+		return float64(v), true
+	case uint8:
+		return float64(v), true
+	case uint16:
+		return float64(v), true
+	case uint32:
+		return float64(v), true
+	case uint64:
+		return float64(v), true
+	default:
+		return 0, false
+	}
 }
