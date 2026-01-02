@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"aoi-backend/internal/core/cache"
 	"aoi-backend/internal/core/database"
 	"aoi-backend/internal/core/errors"
 	"aoi-backend/internal/core/logger"
@@ -21,12 +22,14 @@ import (
 type MappingHandler struct {
 	schedulerManager *scheduler.SchedulerManager
 	formulaEngine    *service.FormulaEngine
+	cache            cache.Cache
 }
 
-func NewMappingHandler(schedulerManager *scheduler.SchedulerManager, formulaEngine *service.FormulaEngine) *MappingHandler {
+func NewMappingHandler(schedulerManager *scheduler.SchedulerManager, formulaEngine *service.FormulaEngine, cacheInstance cache.Cache) *MappingHandler {
 	return &MappingHandler{
 		schedulerManager: schedulerManager,
 		formulaEngine:    formulaEngine,
+		cache:            cacheInstance,
 	}
 }
 
@@ -643,8 +646,98 @@ func (h *MappingHandler) Save(c *gin.Context) {
 		}
 	}
 
-	// Trigger immediate execution for newly created parameters
-	// This ensures data appears in dashboard immediately
+	// Collect clean parameters first to identify which ones need immediate execution
+	// DIRECT: already clean, broadcast directly
+	// CLEAN: logical parameter, clean value, broadcast
+	// FORMULA: result of calculation, also clean (ready to use)
+	// SOURCE: raw data, internal only, NOT included in clean_parameters
+	var cleanParameters []gin.H
+	var cleanParamsToTrigger []domain.Parameter
+
+	for _, param := range createdParams {
+		if param.ParameterMode == domain.ParameterModeDIRECT ||
+			param.ParameterMode == domain.ParameterModeCLEAN ||
+			param.ParameterMode == domain.ParameterModeFORMULA {
+			cleanParamsToTrigger = append(cleanParamsToTrigger, param)
+		}
+	}
+
+	// Trigger immediate execution for clean parameters to get values quickly
+	// This ensures data appears in cache before we read it
+	if h.schedulerManager != nil && len(cleanParamsToTrigger) > 0 {
+		// Wait a bit for scheduler to finish reloading
+		time.Sleep(200 * time.Millisecond)
+
+		// Trigger immediate execution for clean parameters
+		for _, param := range cleanParamsToTrigger {
+			logger.GetLogger().Infof("Triggering immediate execution for clean parameter %d (type: %s)", param.ID, param.Type)
+			h.schedulerManager.TriggerImmediateExecution(param.ID, param.Type)
+		}
+
+		// Wait for immediate execution to complete and data to be cached
+		time.Sleep(800 * time.Millisecond)
+	}
+
+	// Now collect clean parameters with their values from cache
+	// Retry mechanism to get values from cache after execution
+	for _, param := range cleanParamsToTrigger {
+		var value interface{} = nil
+
+		if h.cache != nil {
+			// For DIRECT and CLEAN: use clean cache key
+			// For FORMULA: also use clean cache key (formula engine stores result there)
+			cleanCacheKey := fmt.Sprintf("parameter:clean:%d", param.ID)
+
+			// Retry up to 3 times with increasing delay
+			maxRetries := 3
+			for retry := 0; retry < maxRetries; retry++ {
+				var cleanData domain.RealtimeData
+				if err := h.cache.Get(cleanCacheKey, &cleanData); err == nil {
+					// Found clean data
+					if cleanData.ProcessedValue != nil {
+						value = cleanData.ProcessedValue
+						logger.GetLogger().Infof("[MAPPING] Found clean value in cache for parameter %d (retry %d): %v",
+							param.ID, retry+1, value)
+						break
+					}
+				}
+
+				// If not found and not last retry, wait a bit longer
+				if retry < maxRetries-1 {
+					waitTime := time.Duration(300*(retry+1)) * time.Millisecond
+					logger.GetLogger().Debugf("[MAPPING] Clean value not found for parameter %d (retry %d), waiting %v...",
+						param.ID, retry+1, waitTime)
+					time.Sleep(waitTime)
+
+					// Re-trigger execution for this parameter
+					if h.schedulerManager != nil {
+						h.schedulerManager.TriggerImmediateExecution(param.ID, param.Type)
+					}
+
+					// For FORMULA parameters, also trigger formula evaluation
+					if param.ParameterMode == domain.ParameterModeFORMULA && h.formulaEngine != nil {
+						logger.GetLogger().Debugf("[MAPPING] Triggering formula evaluation for parameter %d", param.ID)
+						if err := h.formulaEngine.EvaluateFormula(param.ID); err != nil {
+							logger.GetLogger().Warnf("[MAPPING] Failed to evaluate formula for parameter %d: %v", param.ID, err)
+						}
+					}
+				} else {
+					logger.GetLogger().Debugf("[MAPPING] Clean value not found for parameter %d after %d retries",
+						param.ID, maxRetries)
+				}
+			}
+		}
+
+		cleanParameters = append(cleanParameters, gin.H{
+			"id":    param.ID,
+			"nama":  param.Nama,
+			"value": value,
+		})
+		logger.GetLogger().Infof("[MAPPING] Added to clean_parameters: id=%d, nama=%s, mode=%s, value=%v",
+			param.ID, param.Nama, param.ParameterMode, value)
+	}
+
+	// Trigger immediate execution for all parameters in background (for dashboard update)
 	if h.schedulerManager != nil {
 		go func() {
 			// Wait a bit for scheduler to finish reloading
@@ -658,24 +751,10 @@ func (h *MappingHandler) Save(c *gin.Context) {
 		}()
 	}
 
-	// Collect clean parameters - parameters that are already clean and ready to use
-	// DIRECT: already clean, broadcast directly
-	// FORMULA: result of calculation, also clean (ready to use)
-	// SOURCE: raw data, internal only, NOT included in clean_parameters
-	var cleanParameters []gin.H
-	for _, param := range createdParams {
-		if param.ParameterMode == domain.ParameterModeDIRECT || param.ParameterMode == domain.ParameterModeFORMULA {
-			cleanParameters = append(cleanParameters, gin.H{
-				"id":   param.ID,
-				"nama": param.Nama,
-			})
-			logger.GetLogger().Infof("[MAPPING] Added to clean_parameters: id=%d, nama=%s, mode=%s", 
-				param.ID, param.Nama, param.ParameterMode)
-		}
-	}
-	
 	if len(cleanParameters) == 0 {
 		logger.GetLogger().Warnf("[MAPPING] No clean parameters found (only SOURCE parameters created?)")
+	} else {
+		logger.GetLogger().Infof("[MAPPING] Collected %d clean parameters for response", len(cleanParameters))
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
@@ -891,9 +970,16 @@ func createProtocolConfig(tx *gorm.DB, param *domain.Parameter, paramType string
 			return errors.NewValidationError("OID is required for SNMP", "")
 		}
 
-		community := "public" // Default
+		// Get community from connectionConfig, required field
+		community := ""
 		if comm, ok := connectionConfig["community"].(string); ok && comm != "" {
 			community = comm
+		}
+		// If community is empty, use "public" as default for backward compatibility
+		// but log a warning that it's using default
+		if community == "" {
+			logger.GetLogger().Warnf("[MAPPING] SNMP community not provided for parameter %d, using default 'public'", param.ID)
+			community = "public"
 		}
 
 		version := "v2c" // Default

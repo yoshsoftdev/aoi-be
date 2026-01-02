@@ -407,6 +407,12 @@ func (h *ModbusHandler) TestConnection(c *gin.Context) {
 		if config.Port == 0 {
 			config.Port = 161 // default SNMP port
 		}
+		// If community is empty, use "public" as default for backward compatibility
+		// but log a warning
+		if config.Community == "" {
+			log.Warn("[SNMP TEST] Community not provided, using default 'public'")
+			config.Community = "public"
+		}
 
 		client, err := snmp.NewSNMPClient(config)
 		if err != nil {

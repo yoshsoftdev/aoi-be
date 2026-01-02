@@ -20,6 +20,10 @@ type Koneksi struct {
 	IPAddress *string `gorm:"type:varchar(50)" json:"ip_address,omitempty"`
 	TCPPort   *int    `json:"tcp_port,omitempty"`
 
+	// SNMP Configuration (for SNMP type connections)
+	Community *string `gorm:"type:varchar(100)" json:"community,omitempty"` // SNMP community string
+	Version   *string `gorm:"type:varchar(10)" json:"version,omitempty"`    // SNMP version: v1, v2c, v3
+
 	// Common Modbus Settings
 	SlaveID *int `json:"slave_id,omitempty"`
 

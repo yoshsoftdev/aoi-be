@@ -135,7 +135,7 @@ func SetupRoutes(
 
 		// Mapping
 		// Use the shared formulaEngine instance (passed from main.go)
-		mappingHandler := handlers.NewMappingHandler(schedulerManager, formulaEngine)
+		mappingHandler := handlers.NewMappingHandler(schedulerManager, formulaEngine, cache)
 		mapping := v1.Group("/mapping")
 		{
 			mapping.POST("/save", mappingHandler.Save)
