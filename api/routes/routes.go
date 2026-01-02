@@ -129,6 +129,13 @@ func SetupRoutes(
 			realtime.GET("/:parameter_id", realtimeHandler.GetByParameterID)
 		}
 
+		// Snaps - snapshot of all parameter values from cache
+		snapsHandler := handlers.NewSnapsHandler(cache)
+		snaps := v1.Group("/snaps")
+		{
+			snaps.GET("", snapsHandler.GetSnaps)
+		}
+
 		// WebSocket
 		wsHandler := handlers.NewWebSocketHandler(wsHub)
 		v1.GET("/ws", wsHandler.Handle)
