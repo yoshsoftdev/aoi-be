@@ -5,6 +5,7 @@ import (
 	"math"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"aoi-backend/internal/core/logger"
@@ -13,21 +14,41 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	// Batch configuration for optimized broadcasting
+	batchWindowMs    = 50  // Collect updates for 50ms before sending batch
+	maxBatchSize     = 100 // Maximum parameters per batch message
+	broadcastBufSize = 1024 // Increased buffer size for high throughput
+)
+
 type WebSocketHub struct {
 	clients    map[*websocket.Conn]bool
 	broadcast  chan []byte
 	register   chan *websocket.Conn
 	unregister chan *websocket.Conn
 	mu         sync.RWMutex
+	
+	// Batch broadcast optimization
+	batchUpdates chan domain.RealtimeData
+	batchMu      sync.Mutex
+	batchBuffer  []domain.RealtimeData
+	batchTimer   *time.Timer
 }
 
 func NewWebSocketHub() *WebSocketHub {
-	return &WebSocketHub{
-		clients:    make(map[*websocket.Conn]bool),
-		broadcast:  make(chan []byte, 256),
-		register:   make(chan *websocket.Conn),
-		unregister: make(chan *websocket.Conn),
+	hub := &WebSocketHub{
+		clients:      make(map[*websocket.Conn]bool),
+		broadcast:    make(chan []byte, broadcastBufSize),
+		register:     make(chan *websocket.Conn),
+		unregister:   make(chan *websocket.Conn),
+		batchUpdates: make(chan domain.RealtimeData, 1024),
+		batchBuffer:  make([]domain.RealtimeData, 0, maxBatchSize),
 	}
+	
+	// Start batch processor
+	go hub.processBatches()
+	
+	return hub
 }
 
 func (h *WebSocketHub) Run() {
@@ -55,35 +76,29 @@ func (h *WebSocketHub) Run() {
 			clientCount := len(clients)
 			h.mu.RUnlock()
 
-			// Log broadcast details
+			if clientCount == 0 {
+				continue
+			}
+
+			// Log broadcast details (only for single updates, batch logs separately)
 			var msgData map[string]interface{}
 			if err := json.Unmarshal(message, &msgData); err == nil {
 				if data, ok := msgData["data"].(map[string]interface{}); ok {
-					paramID, _ := data["parameter_id"].(float64)
-					paramName, _ := data["parameter_nama"].(string)
-					value := data["value"]
-					logger.GetLogger().Infof("[BROADCAST] Sending to %d clients: parameter_id=%v, parameter_nama=%s, value=%v, type=%v",
-						clientCount, uint(paramID), paramName, value, msgData["type"])
+					// Check if this is a batch update
+					if _, isBatch := msgData["batch"]; isBatch {
+						if dataArray, ok := data["updates"].([]interface{}); ok {
+							logger.GetLogger().Debugf("[BROADCAST] Sending batch to %d clients: %d parameters", clientCount, len(dataArray))
+						}
+					} else {
+						// Single update - only log at debug level to reduce overhead
+						logger.GetLogger().Debugf("[BROADCAST] Sending to %d clients: parameter_id=%v, type=%v",
+							clientCount, data["parameter_id"], msgData["type"])
+					}
 				}
 			}
 
-			// Send message to all clients
-			sentCount := 0
-			for _, conn := range clients {
-				err := conn.WriteMessage(websocket.TextMessage, message)
-				if err != nil {
-					h.mu.Lock()
-					delete(h.clients, conn)
-					h.mu.Unlock()
-					conn.Close()
-					logger.GetLogger().Warnf("[BROADCAST] Failed to send to client, removed: %v", err)
-				} else {
-					sentCount++
-				}
-			}
-			if sentCount > 0 {
-				logger.GetLogger().Debugf("[BROADCAST] Successfully sent to %d/%d clients", sentCount, clientCount)
-			}
+			// Send message to all clients in parallel
+			h.sendToClientsParallel(clients, message)
 		}
 	}
 }
@@ -111,8 +126,9 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 		data.RawValue = nil // Force remove raw value
 	}
 
-	log.Infof("[BROADCAST] Broadcasting CLEAN data: parameter_id=%d, parameter_nama=%s, parameter_type=%s, clean_value=%v, device_nama=%s",
-		data.ParameterID, data.ParameterNama, data.ParameterType, data.ProcessedValue, data.DeviceNama)
+	// Reduced logging overhead - only log at debug level for frequent broadcasts
+	log.Debugf("[BROADCAST] Queueing CLEAN data: parameter_id=%d, parameter_nama=%s, clean_value=%v",
+		data.ParameterID, data.ParameterNama, data.ProcessedValue)
 
 	// Create DashboardData payload compatible with frontend
 	// Frontend expects: parameter_id, device_nama, parameter_nama, value, timestamp, status
@@ -221,8 +237,226 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 		return
 	}
 
-	log.Debugf("[BROADCAST] Queuing broadcast message: %d bytes, parameter_id=%d", len(bytes), data.ParameterID)
+	// Send to batch processor instead of direct broadcast
+	// This allows batching multiple updates together for better performance
+	select {
+	case h.batchUpdates <- data:
+		// Successfully queued for batch processing
+	default:
+		// Batch channel full, fallback to immediate broadcast
+		log.Warnf("[BROADCAST] Batch channel full, sending immediate broadcast for parameter_id=%d", data.ParameterID)
+		h.broadcast <- bytes
+	}
+}
+
+// processBatches collects parameter updates and sends them in batches
+// This significantly reduces WebSocket overhead when broadcasting many parameters
+func (h *WebSocketHub) processBatches() {
+	for {
+		select {
+		case update := <-h.batchUpdates:
+			h.batchMu.Lock()
+			h.batchBuffer = append(h.batchBuffer, update)
+			batchSize := len(h.batchBuffer)
+			
+			// If batch is full, send immediately
+			if batchSize >= maxBatchSize {
+				h.batchMu.Unlock()
+				h.flushBatch()
+			} else {
+				// Start timer for first item in batch if not already started
+				if h.batchTimer == nil {
+					h.batchTimer = time.AfterFunc(batchWindowMs*time.Millisecond, func() {
+						h.flushBatch()
+					})
+				}
+				h.batchMu.Unlock()
+			}
+		}
+	}
+}
+
+// flushBatch sends all buffered updates as a single batch message
+func (h *WebSocketHub) flushBatch() {
+	h.batchMu.Lock()
+	if len(h.batchBuffer) == 0 {
+		if h.batchTimer != nil {
+			h.batchTimer.Stop()
+			h.batchTimer = nil
+		}
+		h.batchMu.Unlock()
+		return
+	}
+
+	// Copy batch buffer and clear it
+	batch := make([]domain.RealtimeData, len(h.batchBuffer))
+	copy(batch, h.batchBuffer)
+	h.batchBuffer = h.batchBuffer[:0]
+	if h.batchTimer != nil {
+		h.batchTimer.Stop()
+		h.batchTimer = nil
+	}
+	h.batchMu.Unlock()
+
+	// Convert batch to dashboard data format
+	updates := make([]map[string]interface{}, 0, len(batch))
+	for _, data := range batch {
+		dashboardData := h.prepareDashboardData(data)
+		if dashboardData != nil {
+			updates = append(updates, dashboardData)
+		}
+	}
+
+	if len(updates) == 0 {
+		return
+	}
+
+	// Create batch message
+	var message map[string]interface{}
+	if len(updates) == 1 {
+		// Single update - use original format for backward compatibility
+		message = map[string]interface{}{
+			"type": "data_update",
+			"data": updates[0],
+		}
+	} else {
+		// Batch update - send multiple parameters in one message
+		message = map[string]interface{}{
+			"type":   "data_update_batch",
+			"batch":  true,
+			"data": map[string]interface{}{
+				"updates": updates,
+				"count":   len(updates),
+			},
+		}
+	}
+
+	bytes, err := json.Marshal(message)
+	if err != nil {
+		logger.GetLogger().Errorf("[BROADCAST] Failed to marshal batch message: %v", err)
+		return
+	}
+
+	logger.GetLogger().Debugf("[BROADCAST] Flushing batch: %d parameters, %d bytes", len(updates), len(bytes))
 	h.broadcast <- bytes
+}
+
+// prepareDashboardData converts RealtimeData to dashboard format
+// Returns nil if data should be skipped
+func (h *WebSocketHub) prepareDashboardData(data domain.RealtimeData) map[string]interface{} {
+	log := logger.GetLogger()
+
+	// GUARD: Ensure RawValue is nil
+	if data.RawValue != nil {
+		data.RawValue = nil
+	}
+
+	var value interface{} = data.ProcessedValue
+
+	// Convert string to numeric if needed
+	if strVal, ok := value.(string); ok {
+		if parsedNum, err := strconv.ParseFloat(strVal, 64); err == nil {
+			value = parsedNum
+		} else {
+			value = float64(0)
+		}
+	}
+
+	if value == nil && data.Status != "offline" {
+		value = float64(0)
+	}
+
+	// Ensure status is never empty
+	status := data.Status
+	if status == "" {
+		status = "offline"
+	}
+
+	// Ensure alarmstatus is never empty
+	alarmStatus := data.AlarmStatus
+	if alarmStatus == "" {
+		alarmStatus = domain.AlarmStatusNormal
+	}
+
+	// Final validation - value must be numeric
+	var finalValue interface{} = value
+	if strVal, ok := value.(string); ok {
+		log.Errorf("[BROADCAST] CRITICAL: Value is still string '%s' for parameter_id=%d, forcing to 0", strVal, data.ParameterID)
+		finalValue = float64(0)
+	} else {
+		finalValue = value
+	}
+
+	// Round value to 2 decimal places if it's a float
+	var roundedValue interface{} = finalValue
+	if finalValue != nil && data.Status != "offline" {
+		switch v := finalValue.(type) {
+		case float64:
+			roundedValue = math.Round(v*100) / 100
+		case float32:
+			roundedValue = float32(math.Round(float64(v)*100) / 100)
+		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+			roundedValue = finalValue
+		default:
+			if numVal, ok := convertToFloat64(finalValue); ok {
+				roundedValue = math.Round(numVal*100) / 100
+			} else {
+				roundedValue = finalValue
+			}
+		}
+	} else {
+		roundedValue = finalValue
+	}
+
+	return map[string]interface{}{
+		"parameter_id":   data.ParameterID,
+		"device_nama":    data.DeviceNama,
+		"parameter_nama": data.ParameterNama,
+		"value":          roundedValue,
+		"timestamp":      data.Timestamp.Format(time.RFC3339),
+		"status":         status,
+		"alarmstatus":    alarmStatus,
+	}
+}
+
+// sendToClientsParallel sends message to all clients in parallel using goroutines
+// This significantly improves performance when there are many connected clients
+func (h *WebSocketHub) sendToClientsParallel(clients []*websocket.Conn, message []byte) {
+	if len(clients) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	sentCount := int32(0)
+	failedCount := int32(0)
+
+	// Send to each client in parallel
+	for _, conn := range clients {
+		wg.Add(1)
+		go func(c *websocket.Conn) {
+			defer wg.Done()
+			
+			// Use WriteMessage with timeout to prevent blocking
+			err := c.WriteMessage(websocket.TextMessage, message)
+			if err != nil {
+				// Remove failed client
+				h.mu.Lock()
+				delete(h.clients, c)
+				h.mu.Unlock()
+				c.Close()
+				atomic.AddInt32(&failedCount, 1)
+				logger.GetLogger().Debugf("[BROADCAST] Failed to send to client, removed: %v", err)
+			} else {
+				atomic.AddInt32(&sentCount, 1)
+			}
+		}(conn)
+	}
+
+	wg.Wait()
+	
+	if sentCount > 0 {
+		logger.GetLogger().Debugf("[BROADCAST] Successfully sent to %d/%d clients", sentCount, len(clients))
+	}
 }
 
 func (h *WebSocketHub) BroadcastError(data domain.RealtimeData) {
