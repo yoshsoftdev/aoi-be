@@ -97,23 +97,24 @@ func (s *ThresholdService) CalculateAlarmStatus(parameterID uint, value float64)
 		return domain.AlarmStatusNormal
 
 	case "min":
-		// Min type: Standard min threshold (original logic)
-		// Apply priority rules
-		if value >= threshold.CriticalHigh {
-			return domain.AlarmStatusCriticalHigh
-		}
+		// Min type: Focus on low values (critical_low, warning_low)
+		// Priority rules for min threshold:
+		// 1. value <= critical_low → critical_low (most important - trigger alarm when too low)
+		// 2. value <= warning_low → warning_low
+		// 3. value < min_value → abnormal
+		// 4. else → normal
+		// Note: For "min" type, we don't check critical_high or warning_high
+		// because the focus is on monitoring minimum values
 		if value <= threshold.CriticalLow {
 			return domain.AlarmStatusCriticalLow
-		}
-		if value >= threshold.WarningHigh {
-			return domain.AlarmStatusWarningHigh
 		}
 		if value <= threshold.WarningLow {
 			return domain.AlarmStatusWarningLow
 		}
-		if value < threshold.MinValue || value > threshold.MaxValue {
+		if value < threshold.MinValue {
 			return domain.AlarmStatusAbnormal
 		}
+		// Value is above min_value and above warning_low, so it's normal
 		return domain.AlarmStatusNormal
 
 	default:
@@ -180,4 +181,3 @@ func (s *ThresholdService) ApplyThreshold(data *domain.RealtimeData) {
 	// Calculate alarm status
 	data.AlarmStatus = s.CalculateAlarmStatus(data.ParameterID, value)
 }
-
