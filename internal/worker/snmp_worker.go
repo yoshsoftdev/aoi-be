@@ -64,7 +64,15 @@ func NewSNMPWorker(
 	}
 }
 
-func (w *SNMPWorker) Execute(ctx context.Context, configID uint) error {
+func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
+	// Panic recovery to prevent crash on concurrent SNMP requests
+	defer func() {
+		if r := recover(); r != nil {
+			logger.GetLogger().Errorf("[SNMP] PANIC RECOVERED in Execute: config_id=%d, panic=%v", configID, r)
+			err = fmt.Errorf("panic recovered: %v", r)
+		}
+	}()
+
 	config, err := w.repo.GetByID(configID)
 	if err != nil {
 		return fmt.Errorf("failed to get SNMP config: %w", err)
@@ -82,19 +90,67 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) error {
 		return fmt.Errorf("failed to get parameter: %w", err)
 	}
 
-	// Create SNMP client
-	client, err := snmp.NewSNMPClient(config)
+	// Create SNMP client with panic recovery
+	var client *snmp.SNMPClient
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.GetLogger().Errorf("[SNMP] PANIC in NewSNMPClient: config_id=%d, parameter_id=%d, panic=%v",
+					configID, config.IDParameter, r)
+				err = fmt.Errorf("panic in NewSNMPClient: %v", r)
+			}
+		}()
+		var createErr error
+		client, createErr = snmp.NewSNMPClient(config)
+		if createErr != nil {
+			w.handleError(config.IDParameter, param.Nama, param.Type, createErr)
+			err = createErr
+		}
+	}()
+
 	if err != nil {
-		w.handleError(config.IDParameter, param.Nama, param.Type, err)
 		return err
 	}
-	defer client.Close()
 
-	// Get SNMP value
-	rawValue, err := client.Get(ctx, config.OID)
+	if client == nil {
+		return fmt.Errorf("failed to create SNMP client (panic or error)")
+	}
+
+	defer func() {
+		if client != nil {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.GetLogger().Errorf("[SNMP] PANIC in client.Close: config_id=%d, panic=%v", configID, r)
+				}
+			}()
+			client.Close()
+		}
+	}()
+
+	// Get SNMP value with panic recovery
+	var rawValue interface{}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.GetLogger().Errorf("[SNMP] PANIC in client.Get: config_id=%d, parameter_id=%d, oid=%s, panic=%v",
+					configID, config.IDParameter, config.OID, r)
+				err = fmt.Errorf("panic in client.Get: %v", r)
+			}
+		}()
+		var getErr error
+		rawValue, getErr = client.Get(ctx, config.OID)
+		if getErr != nil {
+			w.handleError(config.IDParameter, param.Nama, param.Type, getErr)
+			err = getErr
+		}
+	}()
+
 	if err != nil {
-		w.handleError(config.IDParameter, param.Nama, param.Type, err)
 		return err
+	}
+
+	if rawValue == nil {
+		return fmt.Errorf("failed to get SNMP value (panic or error)")
 	}
 
 	// Handle string values: map to numeric using string mapping

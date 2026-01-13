@@ -16,8 +16,8 @@ import (
 
 const (
 	// Batch configuration for optimized broadcasting
-	batchWindowMs    = 50  // Collect updates for 50ms before sending batch
-	maxBatchSize     = 100 // Maximum parameters per batch message
+	batchWindowMs    = 50   // Collect updates for 50ms before sending batch
+	maxBatchSize     = 100  // Maximum parameters per batch message
 	broadcastBufSize = 1024 // Increased buffer size for high throughput
 )
 
@@ -27,7 +27,7 @@ type WebSocketHub struct {
 	register   chan *websocket.Conn
 	unregister chan *websocket.Conn
 	mu         sync.RWMutex
-	
+
 	// Batch broadcast optimization
 	batchUpdates chan domain.RealtimeData
 	batchMu      sync.Mutex
@@ -44,10 +44,10 @@ func NewWebSocketHub() *WebSocketHub {
 		batchUpdates: make(chan domain.RealtimeData, 1024),
 		batchBuffer:  make([]domain.RealtimeData, 0, maxBatchSize),
 	}
-	
+
 	// Start batch processor
 	go hub.processBatches()
-	
+
 	return hub
 }
 
@@ -220,15 +220,17 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 		"parameter_id":   data.ParameterID,
 		"device_nama":    data.DeviceNama,                     // Device name
 		"parameter_nama": data.ParameterNama,                  // Logical parameter name (not raw naming)
-		"value":          roundedValue,                         // Final value (ALWAYS numeric, never string, rounded to 2 decimals)
+		"value":          roundedValue,                        // Final value (ALWAYS numeric, never string, rounded to 2 decimals)
 		"timestamp":      data.Timestamp.Format(time.RFC3339), // Convert to RFC3339 string
 		"status":         status,                              // Status (never empty, defaults to "offline")
 		"alarmstatus":    alarmStatus,                         // Alarm status (never empty, defaults to "normal")
 	}
 
+	// Format single message: {"data":{...},"type":"data_update"}
+	// Urutan field: data, type (sesuai contoh di ws-respon.md)
 	message := map[string]interface{}{
-		"type": "data_update",
 		"data": dashboardData,
+		"type": "data_update",
 	}
 
 	bytes, err := json.Marshal(message)
@@ -258,7 +260,7 @@ func (h *WebSocketHub) processBatches() {
 			h.batchMu.Lock()
 			h.batchBuffer = append(h.batchBuffer, update)
 			batchSize := len(h.batchBuffer)
-			
+
 			// If batch is full, send immediately
 			if batchSize >= maxBatchSize {
 				h.batchMu.Unlock()
@@ -312,22 +314,28 @@ func (h *WebSocketHub) flushBatch() {
 	}
 
 	// Create batch message
+	// Format sesuai dengan ws-respon.md:
+	// - Batch: {"batch":true,"data":{"count":N,"updates":[...]},"type":"data_update_batch"}
+	// - Single: {"data":{...},"type":"data_update"}
 	var message map[string]interface{}
 	if len(updates) == 1 {
 		// Single update - use original format for backward compatibility
+		// Format: {"data":{...},"type":"data_update"}
 		message = map[string]interface{}{
-			"type": "data_update",
 			"data": updates[0],
+			"type": "data_update",
 		}
 	} else {
 		// Batch update - send multiple parameters in one message
+		// Format: {"batch":true,"data":{"count":N,"updates":[...]},"type":"data_update_batch"}
+		// Urutan field: batch, data, type (sesuai contoh di ws-respon.md)
 		message = map[string]interface{}{
-			"type":   "data_update_batch",
-			"batch":  true,
+			"batch": true,
 			"data": map[string]interface{}{
-				"updates": updates,
 				"count":   len(updates),
+				"updates": updates,
 			},
+			"type": "data_update_batch",
 		}
 	}
 
@@ -435,7 +443,7 @@ func (h *WebSocketHub) sendToClientsParallel(clients []*websocket.Conn, message 
 		wg.Add(1)
 		go func(c *websocket.Conn) {
 			defer wg.Done()
-			
+
 			// Use WriteMessage with timeout to prevent blocking
 			err := c.WriteMessage(websocket.TextMessage, message)
 			if err != nil {
@@ -453,7 +461,7 @@ func (h *WebSocketHub) sendToClientsParallel(clients []*websocket.Conn, message 
 	}
 
 	wg.Wait()
-	
+
 	if sentCount > 0 {
 		logger.GetLogger().Debugf("[BROADCAST] Successfully sent to %d/%d clients", sentCount, len(clients))
 	}

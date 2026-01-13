@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -30,15 +31,24 @@ type PollingJob struct {
 type SchedulerManager struct {
 	cron            *cron.Cron
 	jobs            map[string]cron.EntryID // Legacy: keep for compatibility (not used in new implementation)
+	snmpJobs        map[uint]cron.EntryID   // SNMP jobs: parameter_id -> entry_id (for parallel execution)
+	snmpJobsMu      sync.RWMutex            // Mutex for SNMP jobs map
+	snmpSemaphore   chan struct{}           // Semaphore to limit concurrent SNMP requests (prevent resource exhaustion)
 	modbusRTUWorker *worker.ModbusRTUWorker
 	modbusTCPWorker *worker.ModbusTCPWorker
 	snmpWorker      *worker.SNMPWorker
 	db              *gorm.DB
 
-	// Per-connection polling workers (round-robin)
+	// Per-connection polling workers (round-robin) - only for Modbus
 	pollingWorkers map[uint]*ConnectionPollingWorker // connection_id -> worker
 	workersMu      sync.RWMutex
 }
+
+const (
+	// MaxConcurrentSNMP limits the number of concurrent SNMP requests
+	// This prevents resource exhaustion and crashes when many SNMP parameters are polled simultaneously
+	maxConcurrentSNMP = 50
+)
 
 func NewSchedulerManager(
 	modbusRTUWorker *worker.ModbusRTUWorker,
@@ -48,6 +58,8 @@ func NewSchedulerManager(
 	return &SchedulerManager{
 		cron:            cron.New(cron.WithSeconds()),
 		jobs:            make(map[string]cron.EntryID),
+		snmpJobs:        make(map[uint]cron.EntryID),
+		snmpSemaphore:   make(chan struct{}, maxConcurrentSNMP), // Limit concurrent SNMP requests
 		modbusRTUWorker: modbusRTUWorker,
 		modbusTCPWorker: modbusTCPWorker,
 		snmpWorker:      snmpWorker,
@@ -63,6 +75,11 @@ func (s *SchedulerManager) Start() {
 
 func (s *SchedulerManager) Stop() {
 	s.cron.Stop()
+
+	// Remove all SNMP cron jobs
+	s.snmpJobsMu.Lock()
+	s.snmpJobs = make(map[uint]cron.EntryID)
+	s.snmpJobsMu.Unlock()
 
 	// Stop all polling workers
 	s.workersMu.Lock()
@@ -129,6 +146,7 @@ func (s *SchedulerManager) loadAndScheduleAll() {
 
 	// Collect all polling jobs
 	var pollingJobs []PollingJob
+	var snmpJobs []PollingJob // Separate SNMP jobs for parallel execution
 
 	// Load Modbus RTU with Parameter and Device
 	// CRITICAL: Only poll SOURCE & DIRECT parameters (not CLEAN, not FORMULA)
@@ -278,7 +296,8 @@ func (s *SchedulerManager) loadAndScheduleAll() {
 		if pollingMs > 0 {
 			// CRITICAL FIX: Capture config.ID in local variable to avoid closure issue
 			configID := config.ID
-			pollingJobs = append(pollingJobs, PollingJob{
+			// SNMP jobs go to separate list for parallel execution (no queue)
+			snmpJobs = append(snmpJobs, PollingJob{
 				ConfigID:     config.ID,
 				ParameterID:  config.IDParameter,
 				ConnectionID: config.Parameter.DeviceID,
@@ -289,18 +308,26 @@ func (s *SchedulerManager) loadAndScheduleAll() {
 					return s.snmpWorker.Execute(ctx, configID)
 				},
 			})
-			log.Infof("[SCHEDULER]   [%d] ✅ Added to pollingJobs: Parameter ID=%d, Connection ID=%d, Config ID=%d (captured)", idx+1, config.IDParameter, config.Parameter.DeviceID, configID)
+			log.Infof("[SCHEDULER]   [%d] ✅ Added to SNMP jobs (parallel): Parameter ID=%d, Connection ID=%d, Config ID=%d (captured)", idx+1, config.IDParameter, config.Parameter.DeviceID, configID)
 		} else {
 			log.Warnf("[SCHEDULER]   [%d] ⚠️  Skipping (pollingMs=0): Config ID=%d, Parameter ID=%d", idx+1, config.ID, config.IDParameter)
 		}
 	}
 
 	log.Infof("[SCHEDULER] ===== END QUERY RESULT: SNMP =====")
-	log.Infof("[SCHEDULER] Total pollingJobs after SNMP: %d", len(pollingJobs))
+	log.Infof("[SCHEDULER] Total Modbus pollingJobs: %d", len(pollingJobs))
+	log.Infof("[SCHEDULER] Total SNMP jobs (parallel): %d", len(snmpJobs))
 
-	// Group jobs by connection
-	log.Infof("[SCHEDULER] ===== GROUPING JOBS BY CONNECTION =====")
-	log.Infof("[SCHEDULER] Total pollingJobs before grouping: %d", len(pollingJobs))
+	// Schedule SNMP jobs separately (parallel execution, no queue)
+	log.Infof("[SCHEDULER] ===== SCHEDULING SNMP JOBS (PARALLEL) =====")
+	for _, job := range snmpJobs {
+		s.scheduleSNMPJob(job)
+	}
+	log.Infof("[SCHEDULER] Scheduled %d SNMP jobs for parallel execution", len(snmpJobs))
+
+	// Group Modbus jobs by connection (for queue/sequential execution)
+	log.Infof("[SCHEDULER] ===== GROUPING MODBUS JOBS BY CONNECTION (QUEUE) =====")
+	log.Infof("[SCHEDULER] Total Modbus pollingJobs before grouping: %d", len(pollingJobs))
 
 	jobsByConnection := make(map[uint][]PollingJob)
 	for _, job := range pollingJobs {
@@ -363,7 +390,89 @@ func (s *SchedulerManager) loadAndScheduleAll() {
 		s.GetOrCreatePollingWorker(connectionID, device.Nama, jobs)
 	}
 
-	log.Infof("[SCHEDULER] Scheduled %d polling jobs across %d connections", len(pollingJobs), len(jobsByConnection))
+	log.Infof("[SCHEDULER] Scheduled %d Modbus polling jobs (queue) across %d connections", len(pollingJobs), len(jobsByConnection))
+	log.Infof("[SCHEDULER] Scheduled %d SNMP jobs (parallel)", len(snmpJobs))
+}
+
+// scheduleSNMPJob schedules a single SNMP job for parallel execution (no queue)
+// Each SNMP parameter gets its own cron job that runs independently
+func (s *SchedulerManager) scheduleSNMPJob(job PollingJob) {
+	log := logger.GetLogger()
+	
+	// Convert polling interval to cron expression
+	// pollingMs is in milliseconds, convert to seconds for cron
+	pollingSeconds := job.PollingMs / 1000
+	if pollingSeconds < 1 {
+		pollingSeconds = 1 // Minimum 1 second
+	}
+	
+	// Create cron expression: every N seconds
+	// Format: "*/N * * * * *" (every N seconds)
+	cronExpr := fmt.Sprintf("*/%d * * * * *", pollingSeconds)
+	
+	// Capture job variables for closure
+	configID := job.ConfigID
+	parameterID := job.ParameterID
+	connectionID := job.ConnectionID
+	
+	log.Infof("[SCHEDULER] Scheduling SNMP job: parameter_id=%d, connection_id=%d, config_id=%d, polling_ms=%d, cron=%s",
+		parameterID, connectionID, configID, job.PollingMs, cronExpr)
+	
+	// Schedule cron job for this SNMP parameter
+	// CRITICAL: Add panic recovery and semaphore to prevent crashes and resource exhaustion
+	entryID, err := s.cron.AddFunc(cronExpr, func() {
+		// Panic recovery to prevent crash
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorf("[SNMP-PARALLEL] PANIC RECOVERED: parameter_id=%d, connection_id=%d, config_id=%d, panic=%v",
+					parameterID, connectionID, configID, r)
+			}
+		}()
+		
+		// Acquire semaphore to limit concurrent SNMP requests
+		// This prevents resource exhaustion when many SNMP parameters are polled simultaneously
+		select {
+		case s.snmpSemaphore <- struct{}{}:
+			// Acquired semaphore, proceed with execution
+			defer func() {
+				<-s.snmpSemaphore // Release semaphore when done
+			}()
+		case <-time.After(5 * time.Second):
+			// Timeout waiting for semaphore (too many concurrent requests)
+			log.Warnf("[SNMP-PARALLEL] Semaphore timeout: parameter_id=%d, connection_id=%d, config_id=%d (too many concurrent requests)",
+				parameterID, connectionID, configID)
+			return
+		}
+		
+		// Create context with timeout
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		
+		log.Debugf("[SNMP-PARALLEL] Executing SNMP poll: parameter_id=%d, connection_id=%d, config_id=%d",
+			parameterID, connectionID, configID)
+		
+		// Execute SNMP poll with error handling
+		if err := s.snmpWorker.Execute(ctx, configID); err != nil {
+			log.Warnf("[SNMP-PARALLEL] SNMP poll failed: parameter_id=%d, connection_id=%d, error=%v",
+				parameterID, connectionID, err)
+		} else {
+			log.Debugf("[SNMP-PARALLEL] SNMP poll completed: parameter_id=%d, connection_id=%d",
+				parameterID, connectionID)
+		}
+	})
+	
+	if err != nil {
+		log.Errorf("[SCHEDULER] Failed to schedule SNMP job: parameter_id=%d, error=%v", parameterID, err)
+		return
+	}
+	
+	// Store entry ID for later removal during reload
+	s.snmpJobsMu.Lock()
+	s.snmpJobs[parameterID] = entryID
+	s.snmpJobsMu.Unlock()
+
+	log.Infof("[SCHEDULER] ✅ SNMP job scheduled: parameter_id=%d, entry_id=%d, cron=%s",
+		parameterID, entryID, cronExpr)
 }
 
 // scheduleJobToQueue is deprecated - replaced by round-robin polling workers
@@ -411,6 +520,15 @@ func (s *SchedulerManager) RemoveJob(jobID string) {
 func (s *SchedulerManager) Reload() {
 	log := logger.GetLogger()
 	log.Info("[SCHEDULER] Reloading all scheduled jobs...")
+
+	// Remove all existing SNMP cron jobs
+	s.snmpJobsMu.Lock()
+	for paramID, entryID := range s.snmpJobs {
+		s.cron.Remove(entryID)
+		log.Debugf("[SCHEDULER] Removed SNMP cron job: parameter_id=%d, entry_id=%d", paramID, entryID)
+	}
+	s.snmpJobs = make(map[uint]cron.EntryID)
+	s.snmpJobsMu.Unlock()
 
 	// Stop all polling workers
 	s.workersMu.Lock()
