@@ -43,7 +43,16 @@ func (h *SnapsHandler) GetSnaps(c *gin.Context) {
 	snapshots := make([]gin.H, 0)
 
 	for _, param := range params {
-		// Only include parameters that should have clean data (DIRECT, CLEAN, FORMULA)
+		// Only include parameters yang tampil di Dashboard:
+		// - direction = READ (READ parameter)
+		// - parameter_mode = DIRECT, CLEAN, FORMULA
+		// SOURCE dan WRITE parameter TIDAK muncul di dashboard.
+
+		// Skip WRITE parameters (command/on-demand), tidak untuk dashboard
+		if param.Direction == "WRITE" {
+			continue
+		}
+
 		// SOURCE parameters are internal only and not exposed
 		if param.ParameterMode == domain.ParameterModeSOURCE {
 			continue
