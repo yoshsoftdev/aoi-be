@@ -3,6 +3,7 @@ package repository
 import (
 	"aoi-backend/internal/core/database"
 	"aoi-backend/internal/domain"
+	"fmt"
 
 	"gorm.io/gorm"
 )
@@ -44,7 +45,59 @@ func (r *workflowRepository) GetByID(id uint) (*domain.Workflow, error) {
 }
 
 func (r *workflowRepository) Create(workflow *domain.Workflow) error {
-	return database.GetDB().Create(workflow).Error
+	db := database.GetDB()
+
+	// Store conditions and actions separately to prevent GORM from creating them twice
+	conditions := workflow.Conditions
+	actions := workflow.Actions
+
+	// Use transaction to ensure atomicity
+	return db.Transaction(func(tx *gorm.DB) error {
+		// Reset all IDs to ensure no conflicts with deleted workflows
+		workflow.ID = 0
+
+		// Clear Conditions and Actions from workflow struct to prevent GORM from creating them
+		// We'll create them separately after workflow is created
+		workflow.Conditions = nil
+		workflow.Actions = nil
+
+		// Create workflow first (without relations)
+		if err := tx.Create(workflow).Error; err != nil {
+			return fmt.Errorf("failed to create workflow: %w", err)
+		}
+
+		// Reset IDs for all conditions and set WorkflowID
+		for i := range conditions {
+			conditions[i].ID = 0
+			conditions[i].WorkflowID = workflow.ID
+		}
+
+		// Create conditions separately
+		if len(conditions) > 0 {
+			if err := tx.Create(&conditions).Error; err != nil {
+				return fmt.Errorf("failed to create workflow conditions: %w", err)
+			}
+			// Restore conditions to workflow struct for response
+			workflow.Conditions = conditions
+		}
+
+		// Reset IDs for all actions and set WorkflowID
+		for i := range actions {
+			actions[i].ID = 0
+			actions[i].WorkflowID = workflow.ID
+		}
+
+		// Create actions separately
+		if len(actions) > 0 {
+			if err := tx.Create(&actions).Error; err != nil {
+				return fmt.Errorf("failed to create workflow actions: %w", err)
+			}
+			// Restore actions to workflow struct for response
+			workflow.Actions = actions
+		}
+
+		return nil
+	})
 }
 
 func (r *workflowRepository) Update(workflow *domain.Workflow) error {
@@ -96,7 +149,32 @@ func (r *workflowRepository) Update(workflow *domain.Workflow) error {
 }
 
 func (r *workflowRepository) Delete(id uint) error {
-	return database.GetDB().Delete(&domain.Workflow{}, id).Error
+	db := database.GetDB()
+
+	// Use transaction to ensure atomicity
+	return db.Transaction(func(tx *gorm.DB) error {
+		// 1. Delete workflow state (if exists) - explicit delete to ensure cleanup
+		if err := tx.Where("workflow_id = ?", id).Unscoped().Delete(&domain.WorkflowState{}).Error; err != nil {
+			return fmt.Errorf("failed to delete workflow state: %w", err)
+		}
+
+		// 2. Delete workflow conditions - explicit delete to ensure cleanup
+		if err := tx.Where("workflow_id = ?", id).Unscoped().Delete(&domain.WorkflowCondition{}).Error; err != nil {
+			return fmt.Errorf("failed to delete workflow conditions: %w", err)
+		}
+
+		// 3. Delete workflow actions - explicit delete to ensure cleanup
+		if err := tx.Where("workflow_id = ?", id).Unscoped().Delete(&domain.WorkflowAction{}).Error; err != nil {
+			return fmt.Errorf("failed to delete workflow actions: %w", err)
+		}
+
+		// 4. Finally, delete the workflow itself
+		if err := tx.Unscoped().Delete(&domain.Workflow{}, id).Error; err != nil {
+			return fmt.Errorf("failed to delete workflow: %w", err)
+		}
+
+		return nil
+	})
 }
 
 // GetByParameterID returns all workflows that monitor the given parameter
@@ -143,26 +221,31 @@ func (r *workflowRepository) CreateOrUpdateState(state *domain.WorkflowState) er
 // CheckParameterUsage checks if a parameter is used in any workflow
 // Returns: (isUsed, workflowIDs, error)
 // Checks both workflow_condition (monitored parameter) and workflow_action (write target)
+// IMPORTANT: Only checks workflows that still exist (JOIN with workflow table)
 func (r *workflowRepository) CheckParameterUsage(parameterID uint) (bool, []uint, error) {
 	db := database.GetDB()
 	var workflowIDs []uint
 
 	// Check workflow_condition (parameter is monitored)
+	// JOIN with workflow table to ensure workflow still exists
 	var conditionWorkflows []uint
 	err := db.Model(&domain.WorkflowCondition{}).
-		Where("parameter_id = ?", parameterID).
+		Joins("JOIN workflow ON workflow.id = workflow_condition.workflow_id").
+		Where("workflow_condition.parameter_id = ?", parameterID).
 		Distinct().
-		Pluck("workflow_id", &conditionWorkflows).Error
+		Pluck("workflow_condition.workflow_id", &conditionWorkflows).Error
 	if err != nil {
 		return false, nil, err
 	}
 
 	// Check workflow_action (parameter is written to)
+	// JOIN with workflow table to ensure workflow still exists
 	var actionWorkflows []uint
 	err = db.Model(&domain.WorkflowAction{}).
-		Where("parameter_id = ?", parameterID).
+		Joins("JOIN workflow ON workflow.id = workflow_action.workflow_id").
+		Where("workflow_action.parameter_id = ?", parameterID).
 		Distinct().
-		Pluck("workflow_id", &actionWorkflows).Error
+		Pluck("workflow_action.workflow_id", &actionWorkflows).Error
 	if err != nil {
 		return false, nil, err
 	}

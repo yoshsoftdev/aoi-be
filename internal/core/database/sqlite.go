@@ -24,8 +24,8 @@ func Init() error {
 		return fmt.Errorf("failed to create database directory: %w", err)
 	}
 
-	// Enable WAL mode for better concurrency
-	dsn := fmt.Sprintf("%s?_journal_mode=WAL", dbPath)
+	// Enable WAL mode for better concurrency and foreign key constraints
+	dsn := fmt.Sprintf("%s?_journal_mode=WAL&_foreign_keys=1", dbPath)
 	
 	var logLevel logger.LogLevel
 	if cfg.App.Env == "development" {
@@ -39,6 +39,11 @@ func Init() error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
+	}
+
+	// Enable foreign key constraints (required for CASCADE to work)
+	if err := db.Exec("PRAGMA foreign_keys = ON").Error; err != nil {
+		return fmt.Errorf("failed to enable foreign keys: %w", err)
 	}
 
 	DB = db
