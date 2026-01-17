@@ -90,3 +90,25 @@ type WorkflowState struct {
 func (WorkflowState) TableName() string {
 	return "workflow_state"
 }
+
+// CurrentAlarm represents an active alarm triggered by a workflow
+type CurrentAlarm struct {
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	WorkflowID    uint      `gorm:"not null;uniqueIndex;index" json:"workflow_id"`
+	WorkflowName  string    `gorm:"size:100;not null" json:"workflow_name"`
+	ParameterID   uint      `gorm:"not null;index" json:"parameter_id"`
+	ParameterName *string   `gorm:"size:100" json:"parameter_name,omitempty"`
+	AlarmMessage  string    `gorm:"type:text;not null" json:"alarm_message"`
+	TriggeredAt   time.Time `gorm:"default:CURRENT_TIMESTAMP" json:"triggered_at"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+
+	// Relations
+	Workflow  *Workflow  `gorm:"foreignKey:WorkflowID" json:"workflow,omitempty"`
+	Parameter *Parameter `gorm:"foreignKey:ParameterID" json:"parameter,omitempty"`
+}
+
+// TableName specifies the table name for CurrentAlarm
+func (CurrentAlarm) TableName() string {
+	return "current_alarm"
+}

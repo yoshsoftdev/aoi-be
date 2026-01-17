@@ -18,7 +18,8 @@ type WorkflowRepository interface {
 	GetByParameterID(parameterID uint) ([]domain.Workflow, error) // Get workflows that monitor this parameter
 	GetStateByWorkflowID(workflowID uint) (*domain.WorkflowState, error)
 	CreateOrUpdateState(state *domain.WorkflowState) error
-	CheckParameterUsage(parameterID uint) (bool, []uint, error) // Check if parameter is used in workflows, returns (isUsed, workflowIDs, error)
+	CheckParameterUsage(parameterID uint) (bool, []uint, error)                   // Check if parameter is used in workflows, returns (isUsed, workflowIDs, error)
+	CheckParameterUsageWithNames(parameterID uint) (bool, map[uint]string, error) // Check if parameter is used in workflows, returns (isUsed, map[workflowID]workflowName, error)
 }
 
 type workflowRepository struct{}
@@ -168,7 +169,13 @@ func (r *workflowRepository) Delete(id uint) error {
 			return fmt.Errorf("failed to delete workflow actions: %w", err)
 		}
 
-		// 4. Finally, delete the workflow itself
+		// 4. Delete current alarm (if exists) - explicit delete to ensure cleanup
+		// Note: Don't fail if no records found (alarm may not exist)
+		if err := tx.Where("workflow_id = ?", id).Delete(&domain.CurrentAlarm{}).Error; err != nil && err != gorm.ErrRecordNotFound {
+			return fmt.Errorf("failed to delete current alarm: %w", err)
+		}
+
+		// 5. Finally, delete the workflow itself
 		if err := tx.Unscoped().Delete(&domain.Workflow{}, id).Error; err != nil {
 			return fmt.Errorf("failed to delete workflow: %w", err)
 		}
@@ -264,4 +271,57 @@ func (r *workflowRepository) CheckParameterUsage(parameterID uint) (bool, []uint
 	}
 
 	return len(workflowIDs) > 0, workflowIDs, nil
+}
+
+// CheckParameterUsageWithNames checks if a parameter is used in any workflow
+// Returns: (isUsed, map[workflowID]workflowName, error)
+// Checks both workflow_condition (monitored parameter) and workflow_action (write target)
+// IMPORTANT: Only checks workflows that still exist (JOIN with workflow table)
+func (r *workflowRepository) CheckParameterUsageWithNames(parameterID uint) (bool, map[uint]string, error) {
+	db := database.GetDB()
+	workflowMap := make(map[uint]string)
+
+	// Check workflow_condition (parameter is monitored)
+	// JOIN with workflow table to get workflow name
+	type ConditionResult struct {
+		WorkflowID   uint   `gorm:"column:workflow_id"`
+		WorkflowName string `gorm:"column:workflow_name"`
+	}
+	var conditionResults []ConditionResult
+	err := db.Model(&domain.WorkflowCondition{}).
+		Select("workflow_condition.workflow_id, workflow.nama as workflow_name").
+		Joins("JOIN workflow ON workflow.id = workflow_condition.workflow_id").
+		Where("workflow_condition.parameter_id = ?", parameterID).
+		Distinct().
+		Scan(&conditionResults).Error
+	if err != nil {
+		return false, nil, err
+	}
+
+	// Check workflow_action (parameter is written to)
+	// JOIN with workflow table to get workflow name
+	type ActionResult struct {
+		WorkflowID   uint   `gorm:"column:workflow_id"`
+		WorkflowName string `gorm:"column:workflow_name"`
+	}
+	var actionResults []ActionResult
+	err = db.Model(&domain.WorkflowAction{}).
+		Select("workflow_action.workflow_id, workflow.nama as workflow_name").
+		Joins("JOIN workflow ON workflow.id = workflow_action.workflow_id").
+		Where("workflow_action.parameter_id = ?", parameterID).
+		Distinct().
+		Scan(&actionResults).Error
+	if err != nil {
+		return false, nil, err
+	}
+
+	// Combine and deduplicate workflows with names
+	for _, result := range conditionResults {
+		workflowMap[result.WorkflowID] = result.WorkflowName
+	}
+	for _, result := range actionResults {
+		workflowMap[result.WorkflowID] = result.WorkflowName
+	}
+
+	return len(workflowMap) > 0, workflowMap, nil
 }

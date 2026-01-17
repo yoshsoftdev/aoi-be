@@ -7,4 +7,5 @@ import "aoi-backend/internal/domain"
 type WebSocketBroadcaster interface {
 	BroadcastDataUpdate(data domain.RealtimeData)
 	BroadcastAlarm(workflowID uint, workflowName string, message string)
+	BroadcastAlarmRemoved(workflowID uint)
 }

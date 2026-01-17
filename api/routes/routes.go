@@ -27,6 +27,7 @@ func SetupRoutes(
 	workflowRepo repository.WorkflowRepository,
 	workflowEngine *service.WorkflowEngine,
 	formulaEngine *service.FormulaEngine,
+	alarmRepo repository.AlarmRepository,
 ) *gin.Engine {
 	router := gin.Default()
 
@@ -180,6 +181,15 @@ func SetupRoutes(
 			threshold.GET("/:parameter_id", thresholdHandler.GetByParameterID) // GET /api/v1/tracehold/:parameter_id (get by parameter_id)
 			threshold.PUT("/:id", thresholdHandler.Update)                     // PUT /api/v1/tracehold/:id (update by threshold ID)
 			threshold.DELETE("/:parameter_id", thresholdHandler.Delete)        // DELETE /api/v1/tracehold/:parameter_id (delete by parameter ID)
+		}
+
+		// Current Alarms
+		alarmHandler := handlers.NewAlarmHandler(alarmRepo)
+		alarms := v1.Group("/alarms")
+		{
+			alarms.GET("", alarmHandler.GetAll)                    // GET /api/v1/alarms (get all current alarms)
+			alarms.DELETE("/:id", alarmHandler.DeleteByID)         // DELETE /api/v1/alarms/:id (delete alarm by ID)
+			alarms.DELETE("/workflow/:workflow_id", alarmHandler.DeleteByWorkflowID) // DELETE /api/v1/alarms/workflow/:workflow_id (delete alarm by workflow ID)
 		}
 	}
 

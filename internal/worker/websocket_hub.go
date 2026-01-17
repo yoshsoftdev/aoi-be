@@ -535,6 +535,31 @@ func (h *WebSocketHub) BroadcastAlarm(workflowID uint, workflowName string, mess
 	h.broadcast <- bytes
 }
 
+// BroadcastAlarmRemoved broadcasts alarm removal notification to all connected WebSocket clients
+func (h *WebSocketHub) BroadcastAlarmRemoved(workflowID uint) {
+	log := logger.GetLogger()
+	log.Infof("[BROADCAST] Broadcasting alarm removal: workflow_id=%d", workflowID)
+
+	alarmRemovedData := map[string]interface{}{
+		"workflow_id": workflowID,
+		"timestamp":   time.Now().Format(time.RFC3339),
+	}
+
+	wsMessage := map[string]interface{}{
+		"type": "alarm_removed",
+		"data": alarmRemovedData,
+	}
+
+	bytes, err := json.Marshal(wsMessage)
+	if err != nil {
+		log.Errorf("[BROADCAST] Failed to marshal alarm removal message: %v", err)
+		return
+	}
+
+	log.Debugf("[BROADCAST] Queuing alarm removal message: %d bytes, workflow_id=%d", len(bytes), workflowID)
+	h.broadcast <- bytes
+}
+
 // convertToFloat64 attempts to convert various numeric types to float64
 func convertToFloat64(value interface{}) (float64, bool) {
 	switch v := value.(type) {

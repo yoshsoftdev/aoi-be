@@ -18,6 +18,7 @@ import (
 type WorkflowEngine struct {
 	workflowRepo  repository.WorkflowRepository
 	paramRepo     repository.ParameterRepository
+	alarmRepo     repository.AlarmRepository
 	cache         cache.Cache
 	writeService  *WriteService
 	wsBroadcaster WebSocketBroadcaster // For broadcasting alarm notifications
@@ -34,6 +35,7 @@ type WorkflowEngine struct {
 func NewWorkflowEngine(
 	workflowRepo repository.WorkflowRepository,
 	paramRepo repository.ParameterRepository,
+	alarmRepo repository.AlarmRepository,
 	cache cache.Cache,
 	writeService *WriteService,
 	wsBroadcaster WebSocketBroadcaster,
@@ -41,6 +43,7 @@ func NewWorkflowEngine(
 	return &WorkflowEngine{
 		workflowRepo:     workflowRepo,
 		paramRepo:        paramRepo,
+		alarmRepo:        alarmRepo,
 		cache:            cache,
 		writeService:     writeService,
 		wsBroadcaster:    wsBroadcaster,
@@ -215,6 +218,26 @@ func (e *WorkflowEngine) evaluateWorkflow(workflow *domain.Workflow, updatedPara
 		log.Warnf("WorkflowEngine: Failed to update state for workflow %d: %v", workflow.ID, err)
 	}
 
+	// Handle alarm cleanup: if condition is no longer met, remove alarm from current_alarm
+	if !allConditionsMet {
+		// Condition is no longer met, check if alarm exists and remove it
+		existingAlarm, err := e.alarmRepo.GetByWorkflowID(workflow.ID)
+		if err != nil {
+			log.Warnf("WorkflowEngine: Failed to check alarm for workflow %d: %v", workflow.ID, err)
+		} else if existingAlarm != nil {
+			// Alarm exists but condition is no longer met, delete it
+			if err := e.alarmRepo.DeleteByWorkflowID(workflow.ID); err != nil {
+				log.Errorf("WorkflowEngine: Failed to delete alarm for workflow %d: %v", workflow.ID, err)
+			} else {
+				log.Infof("WorkflowEngine: Deleted alarm for workflow %d (condition no longer met)", workflow.ID)
+				// Broadcast alarm removal via WebSocket
+				if e.wsBroadcaster != nil {
+					e.wsBroadcaster.BroadcastAlarmRemoved(workflow.ID)
+				}
+			}
+		}
+	}
+
 	// Execute actions if condition is met and edge triggered
 	if shouldExecute {
 		// Update debounce map
@@ -224,7 +247,7 @@ func (e *WorkflowEngine) evaluateWorkflow(workflow *domain.Workflow, updatedPara
 
 		// Execute all actions
 		for _, action := range workflow.Actions {
-			if err := e.executeAction(workflow.ID, action); err != nil {
+			if err := e.executeAction(workflow.ID, workflow, action); err != nil {
 				log.Errorf("WorkflowEngine: Failed to execute action %d for workflow %d: %v", action.ID, workflow.ID, err)
 			}
 		}
@@ -255,7 +278,7 @@ func (e *WorkflowEngine) evaluateCondition(value float64, operator string, thres
 }
 
 // executeAction executes a workflow action
-func (e *WorkflowEngine) executeAction(workflowID uint, action domain.WorkflowAction) error {
+func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflow, action domain.WorkflowAction) error {
 	log := logger.GetLogger()
 
 	switch action.ActionType {
@@ -410,16 +433,9 @@ func (e *WorkflowEngine) executeAction(workflowID uint, action domain.WorkflowAc
 		time.Sleep(time.Duration(*action.DelayMs) * time.Millisecond)
 
 	case "alarm":
-		// ALARM: Show notification with custom message
+		// ALARM: Save to current_alarm table and broadcast notification
 		if action.AlarmMessage == nil || *action.AlarmMessage == "" {
 			return fmt.Errorf("alarm_message is required for alarm action")
-		}
-
-		// Get workflow name for notification
-		workflow, err := e.workflowRepo.GetByID(workflowID)
-		if err != nil {
-			log.Warnf("WorkflowEngine: Failed to get workflow %d for alarm: %v", workflowID, err)
-			workflow = nil
 		}
 
 		workflowName := "Unknown Workflow"
@@ -427,7 +443,33 @@ func (e *WorkflowEngine) executeAction(workflowID uint, action domain.WorkflowAc
 			workflowName = workflow.Nama
 		}
 
-		log.Infof("WorkflowEngine: Alarm action triggered: workflow=%d (%s), message=%s", workflowID, workflowName, *action.AlarmMessage)
+		// Get parameter info for alarm (use first condition's parameter)
+		var parameterID uint
+		var parameterName *string
+		if len(workflow.Conditions) > 0 {
+			parameterID = workflow.Conditions[0].ParameterID
+			param, err := e.paramRepo.GetByID(parameterID)
+			if err == nil && param != nil {
+				parameterName = &param.Nama
+			}
+		}
+
+		// Create or update alarm in current_alarm table
+		alarm := &domain.CurrentAlarm{
+			WorkflowID:    workflowID,
+			WorkflowName:  workflowName,
+			ParameterID:   parameterID,
+			ParameterName: parameterName,
+			AlarmMessage:  *action.AlarmMessage,
+			TriggeredAt:   time.Now(),
+		}
+
+		if err := e.alarmRepo.CreateOrUpdate(alarm); err != nil {
+			log.Errorf("WorkflowEngine: Failed to save alarm to current_alarm table: %v", err)
+			return fmt.Errorf("failed to save alarm: %w", err)
+		}
+
+		log.Infof("WorkflowEngine: Alarm saved to current_alarm: workflow=%d (%s), message=%s", workflowID, workflowName, *action.AlarmMessage)
 
 		// Broadcast alarm notification via WebSocket
 		if e.wsBroadcaster != nil {

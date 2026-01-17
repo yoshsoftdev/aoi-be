@@ -70,6 +70,7 @@ func main() {
 	formulaRepo := repository.NewFormulaRepository()
 	presetRepo := repository.NewPresetRepository()
 	workflowRepo := repository.NewWorkflowRepository(database.GetDB())
+	alarmRepo := repository.NewAlarmRepository(database.GetDB())
 
 	// Initialize services
 	deviceService := service.NewDeviceService(deviceRepo)
@@ -143,6 +144,7 @@ func main() {
 	workflowEngine := service.NewWorkflowEngine(
 		workflowRepo,
 		paramRepo,
+		alarmRepo,
 		cacheInstance,
 		writeService,
 		wsHub, // Pass WebSocketHub for broadcasting alarms
@@ -216,6 +218,7 @@ func main() {
 		workflowRepo,
 		workflowEngine,
 		formulaEngine,
+		alarmRepo,
 	)
 	log.Info("Routes configured successfully")
 
@@ -278,6 +281,7 @@ func runMigrations() error {
 		&domain.WorkflowAction{},
 		&domain.Threshold{},
 		&domain.WorkflowState{},
+		&domain.CurrentAlarm{},
 	); err != nil {
 		return err
 	}
