@@ -55,6 +55,7 @@ type WorkflowAction struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
 	WorkflowID   uint      `gorm:"not null;index" json:"workflow_id"`
 	ActionType   string    `gorm:"size:20;not null" json:"action_type"`      // 'TRIGGER_WRITE', 'WRITE_WITH_VALUE', 'event', 'delay', 'alarm'
+	ActionOrder  int       `gorm:"default:0;index" json:"action_order"`      // Urutan eksekusi action (0, 1, 2, ...), actions dieksekusi secara sequential berdasarkan order ini
 	ParameterID  *uint     `gorm:"index" json:"parameter_id,omitempty"`      // Untuk action_type='TRIGGER_WRITE' atau 'WRITE_WITH_VALUE', parameter WRITE yang akan di-write
 	Value        *float64  `gorm:"type:REAL" json:"value,omitempty"`         // Untuk action_type='WRITE_WITH_VALUE', nilai yang akan di-write (WAJIB untuk DYNAMIC)
 	EventName    *string   `gorm:"size:100" json:"event_name,omitempty"`     // Untuk action_type='event', nama event

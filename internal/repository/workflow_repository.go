@@ -32,13 +32,27 @@ func NewWorkflowRepository(db *gorm.DB) WorkflowRepository {
 
 func (r *workflowRepository) GetAll() ([]domain.Workflow, error) {
 	var workflows []domain.Workflow
-	err := database.GetDB().Preload("Conditions.Parameter").Preload("Actions.Parameter").Preload("State").Find(&workflows).Error
+	err := database.GetDB().
+		Preload("Conditions.Parameter").
+		Preload("Actions", func(db *gorm.DB) *gorm.DB {
+			return db.Order("action_order ASC")
+		}).
+		Preload("Actions.Parameter").
+		Preload("State").
+		Find(&workflows).Error
 	return workflows, err
 }
 
 func (r *workflowRepository) GetByID(id uint) (*domain.Workflow, error) {
 	var workflow domain.Workflow
-	err := database.GetDB().Preload("Conditions.Parameter").Preload("Actions.Parameter").Preload("State").First(&workflow, id).Error
+	err := database.GetDB().
+		Preload("Conditions.Parameter").
+		Preload("Actions", func(db *gorm.DB) *gorm.DB {
+			return db.Order("action_order ASC")
+		}).
+		Preload("Actions.Parameter").
+		Preload("State").
+		First(&workflow, id).Error
 	if err != nil {
 		return nil, err
 	}
@@ -83,9 +97,11 @@ func (r *workflowRepository) Create(workflow *domain.Workflow) error {
 		}
 
 		// Reset IDs for all actions and set WorkflowID
+		// Set action_order based on array index (0, 1, 2, ...)
 		for i := range actions {
 			actions[i].ID = 0
 			actions[i].WorkflowID = workflow.ID
+			actions[i].ActionOrder = i // Set order based on array position
 		}
 
 		// Create actions separately
@@ -139,6 +155,12 @@ func (r *workflowRepository) Update(workflow *domain.Workflow) error {
 		if len(workflow.Actions) > 0 {
 			for i := range workflow.Actions {
 				workflow.Actions[i].WorkflowID = workflow.ID
+				// Set action_order based on array index if not already set
+				if workflow.Actions[i].ActionOrder == 0 && i > 0 {
+					workflow.Actions[i].ActionOrder = i
+				} else if workflow.Actions[i].ActionOrder == 0 {
+					workflow.Actions[i].ActionOrder = 0
+				}
 			}
 			if err := tx.Create(&workflow.Actions).Error; err != nil {
 				return err
@@ -192,6 +214,9 @@ func (r *workflowRepository) GetByParameterID(parameterID uint) ([]domain.Workfl
 		Where("workflow_condition.parameter_id = ? AND workflow.enabled = ?", parameterID, true).
 		Preload("Conditions", "parameter_id = ?", parameterID).
 		Preload("Conditions.Parameter").
+		Preload("Actions", func(db *gorm.DB) *gorm.DB {
+			return db.Order("action_order ASC")
+		}).
 		Preload("Actions.Parameter").
 		Preload("State").
 		Find(&workflows).Error

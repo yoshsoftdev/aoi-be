@@ -245,12 +245,36 @@ func (e *WorkflowEngine) evaluateWorkflow(workflow *domain.Workflow, updatedPara
 		e.debounceMap[workflow.ID] = time.Now()
 		e.mu.Unlock()
 
-		// Execute all actions
-		for _, action := range workflow.Actions {
-			if err := e.executeAction(workflow.ID, workflow, action); err != nil {
-				log.Errorf("WorkflowEngine: Failed to execute action %d for workflow %d: %v", action.ID, workflow.ID, err)
+		// Sort actions by action_order to ensure sequential execution
+		// Actions are executed in order: 0, 1, 2, 3, ...
+		sortedActions := make([]domain.WorkflowAction, len(workflow.Actions))
+		copy(sortedActions, workflow.Actions)
+		
+		// Sort by action_order (ascending)
+		for i := 0; i < len(sortedActions)-1; i++ {
+			for j := i + 1; j < len(sortedActions); j++ {
+				if sortedActions[i].ActionOrder > sortedActions[j].ActionOrder {
+					sortedActions[i], sortedActions[j] = sortedActions[j], sortedActions[i]
+				}
 			}
 		}
+
+		// Execute actions sequentially (one after another, waiting for each to complete)
+		log.Infof("WorkflowEngine: Executing %d actions sequentially for workflow %d", len(sortedActions), workflow.ID)
+		for idx, action := range sortedActions {
+			log.Infof("WorkflowEngine: Executing action %d/%d (order=%d, type=%s) for workflow %d", 
+				idx+1, len(sortedActions), action.ActionOrder, action.ActionType, workflow.ID)
+			
+			if err := e.executeAction(workflow.ID, workflow, action); err != nil {
+				log.Errorf("WorkflowEngine: Failed to execute action %d (order=%d) for workflow %d: %v", 
+					action.ID, action.ActionOrder, workflow.ID, err)
+				// Continue with next action even if current one fails
+			} else {
+				log.Infof("WorkflowEngine: Action %d/%d (order=%d, type=%s) completed successfully for workflow %d", 
+					idx+1, len(sortedActions), action.ActionOrder, action.ActionType, workflow.ID)
+			}
+		}
+		log.Infof("WorkflowEngine: All actions completed for workflow %d", workflow.ID)
 	}
 
 	return nil
