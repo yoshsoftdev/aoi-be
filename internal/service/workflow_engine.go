@@ -249,7 +249,7 @@ func (e *WorkflowEngine) evaluateWorkflow(workflow *domain.Workflow, updatedPara
 		// Actions are executed in order: 0, 1, 2, 3, ...
 		sortedActions := make([]domain.WorkflowAction, len(workflow.Actions))
 		copy(sortedActions, workflow.Actions)
-		
+
 		// Sort by action_order (ascending)
 		for i := 0; i < len(sortedActions)-1; i++ {
 			for j := i + 1; j < len(sortedActions); j++ {
@@ -262,15 +262,15 @@ func (e *WorkflowEngine) evaluateWorkflow(workflow *domain.Workflow, updatedPara
 		// Execute actions sequentially (one after another, waiting for each to complete)
 		log.Infof("WorkflowEngine: Executing %d actions sequentially for workflow %d", len(sortedActions), workflow.ID)
 		for idx, action := range sortedActions {
-			log.Infof("WorkflowEngine: Executing action %d/%d (order=%d, type=%s) for workflow %d", 
+			log.Infof("WorkflowEngine: Executing action %d/%d (order=%d, type=%s) for workflow %d",
 				idx+1, len(sortedActions), action.ActionOrder, action.ActionType, workflow.ID)
-			
+
 			if err := e.executeAction(workflow.ID, workflow, action); err != nil {
-				log.Errorf("WorkflowEngine: Failed to execute action %d (order=%d) for workflow %d: %v", 
+				log.Errorf("WorkflowEngine: Failed to execute action %d (order=%d) for workflow %d: %v",
 					action.ID, action.ActionOrder, workflow.ID, err)
 				// Continue with next action even if current one fails
 			} else {
-				log.Infof("WorkflowEngine: Action %d/%d (order=%d, type=%s) completed successfully for workflow %d", 
+				log.Infof("WorkflowEngine: Action %d/%d (order=%d, type=%s) completed successfully for workflow %d",
 					idx+1, len(sortedActions), action.ActionOrder, action.ActionType, workflow.ID)
 			}
 		}
@@ -341,8 +341,11 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 		log.Infof("WorkflowEngine: Executing TRIGGER_WRITE action: workflow=%d, parameter=%d (PRESET)", workflowID, *action.ParameterID)
 
 		ctx := context.Background()
+		workflowNama := workflow.Nama
 		writeReq := WriteRequest{
-			Mode: "TRIGGER", // New mode for triggering PRESET parameters
+			Mode:         "TRIGGER", // New mode for triggering PRESET parameters
+			WorkflowID:   &workflowID,
+			WorkflowNama: &workflowNama,
 		}
 
 		result, err := e.writeService.Write(ctx, *action.ParameterID, writeReq)
@@ -384,9 +387,12 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 		log.Infof("WorkflowEngine: Executing WRITE_WITH_VALUE action: workflow=%d, parameter=%d, value=%f (DYNAMIC)", workflowID, *action.ParameterID, *action.Value)
 
 		ctx := context.Background()
+		workflowNama := workflow.Nama
 		writeReq := WriteRequest{
-			Mode:  "MANUAL",
-			Value: action.Value,
+			Mode:         "MANUAL",
+			Value:        action.Value,
+			WorkflowID:   &workflowID,
+			WorkflowNama: &workflowNama,
 		}
 
 		result, err := e.writeService.Write(ctx, *action.ParameterID, writeReq)

@@ -21,7 +21,8 @@ type ServerConfig struct {
 }
 
 type DBConfig struct {
-	Path string
+	Path    string
+	LogPath string // Path untuk database log write action
 }
 
 type RedisConfig struct {
@@ -56,6 +57,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("SERVER_PORT", "8071")
 	viper.SetDefault("SERVER_HOST", "0.0.0.0")
 	viper.SetDefault("DB_PATH", "data/aoi-bgn.db")
+	viper.SetDefault("DB_LOG_PATH", "data/aoi-write-log.db")
 	viper.SetDefault("REDIS_ENABLED", false)
 	viper.SetDefault("REDIS_HOST", "localhost")
 	viper.SetDefault("REDIS_PORT", "6379")
@@ -81,7 +83,8 @@ func Load() (*Config, error) {
 			Host: viper.GetString("SERVER_HOST"),
 		},
 		DB: DBConfig{
-			Path: viper.GetString("DB_PATH"),
+			Path:    viper.GetString("DB_PATH"),
+			LogPath: viper.GetString("DB_LOG_PATH"),
 		},
 		Redis: RedisConfig{
 			Enabled:  viper.GetBool("REDIS_ENABLED"),

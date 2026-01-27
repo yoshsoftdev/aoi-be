@@ -22,6 +22,7 @@ type WriteService struct {
 	deviceRepo    repository.DeviceRepository
 	cache         cache.Cache
 	formulaEngine *FormulaEngine
+	writeLogRepo  repository.WriteLogRepository
 }
 
 // NewWriteService creates a new WriteService instance
@@ -33,6 +34,7 @@ func NewWriteService(
 	deviceRepo repository.DeviceRepository,
 	cache cache.Cache,
 	formulaEngine *FormulaEngine,
+	writeLogRepo repository.WriteLogRepository,
 ) *WriteService {
 	return &WriteService{
 		paramRepo:     paramRepo,
@@ -42,6 +44,7 @@ func NewWriteService(
 		deviceRepo:    deviceRepo,
 		cache:         cache,
 		formulaEngine: formulaEngine,
+		writeLogRepo:  writeLogRepo,
 	}
 }
 
@@ -51,6 +54,8 @@ type WriteRequest struct {
 	Value          *float64 `json:"value,omitempty"`           // For MANUAL mode (scalar value)
 	RegisterValues []uint16 `json:"register_values,omitempty"` // For MANUAL mode (raw register values)
 	PresetID       *uint    `json:"preset_id,omitempty"`       // For PRESET mode (legacy)
+	WorkflowID     *uint    `json:"workflow_id,omitempty"`     // For workflow-triggered writes
+	WorkflowNama   *string  `json:"workflow_nama,omitempty"`   // For workflow-triggered writes
 	// TRIGGER mode: uses preset_value from parameter (for workflow triggering PRESET parameters)
 }
 
@@ -66,39 +71,62 @@ type WriteResponse struct {
 func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteRequest) (*WriteResponse, error) {
 	log := logger.GetLogger()
 
+	// Track variables for error logging
+	var param *domain.Parameter
+	var device *domain.Koneksi
+
+	// Helper function to log error and return
+	logErrorAndReturn := func(resp *WriteResponse) (*WriteResponse, error) {
+		if s.writeLogRepo != nil {
+			triggeredBy := "API"
+			if req.WorkflowID != nil {
+				triggeredBy = "WORKFLOW"
+			}
+			writeLog := s.createWriteLog(parameterID, param, device, req, resp, nil, triggeredBy, nil)
+			if err := s.writeLogRepo.Create(writeLog); err != nil {
+				log.Warnf("Failed to write error log: %v", err)
+			}
+		}
+		return resp, nil
+	}
+
 	// 1. Get parameter
 	param, err := s.paramRepo.GetByID(parameterID)
 	if err != nil {
-		return &WriteResponse{
+		resp := &WriteResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Parameter not found: %v", err),
-		}, nil
+		}
+		return logErrorAndReturn(resp)
 	}
 
 	// 2. GUARD: Reject formula parameters
 	if param.IsFormula {
-		return &WriteResponse{
+		resp := &WriteResponse{
 			Success: false,
 			Error:   "Cannot write to formula parameter",
-		}, nil
+		}
+		return logErrorAndReturn(resp)
 	}
 
 	// 3. GUARD: Only WRITE parameters can be written to
 	// Direction must be 'WRITE' (new field) or read_write must be true (legacy)
 	if param.Direction != "WRITE" && !param.ReadWrite {
-		return &WriteResponse{
+		resp := &WriteResponse{
 			Success: false,
 			Error:   "Parameter is not writable. Only parameters with direction=WRITE can be written to",
-		}, nil
+		}
+		return logErrorAndReturn(resp)
 	}
 
 	// 4. Get device
-	device, err := s.deviceRepo.GetByID(param.DeviceID)
+	device, err = s.deviceRepo.GetByID(param.DeviceID)
 	if err != nil {
-		return &WriteResponse{
+		resp := &WriteResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Device not found: %v", err),
-		}, nil
+		}
+		return logErrorAndReturn(resp)
 	}
 
 	// 5. Get Modbus config based on parameter type
@@ -109,28 +137,31 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 	case "modbus_rtu":
 		rtuConfig, err := s.modbusRTURepo.GetByParameterID(parameterID)
 		if err != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   "Modbus RTU config not found",
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 		modbusConfig = rtuConfig
 
 	case "modbus_tcp":
 		tcpConfig, err := s.modbusTCPRepo.GetByParameterID(parameterID)
 		if err != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   "Modbus TCP config not found",
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 		modbusTCPConfig = tcpConfig
 
 	default:
-		return &WriteResponse{
+		resp := &WriteResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Write not supported for parameter type: %s", param.Type),
-		}, nil
+		}
+		return logErrorAndReturn(resp)
 	}
 
 	// Helper to get config values
@@ -180,6 +211,7 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 	// 6. Resolve write value based on mode
 	var writeValue float64
 	var registerValues []uint16
+	var logValue *float64 // Value to log (for TRIGGER mode, this comes from preset_value)
 
 	switch req.Mode {
 	case "TEST":
@@ -199,53 +231,60 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 		} else if req.Value != nil {
 			// Use scalar value (will be encoded to registers)
 			writeValue = *req.Value
+			logValue = req.Value // Store for logging
 			log.Infof("Write MANUAL mode for parameter %d: value=%f", parameterID, writeValue)
 		} else {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   "Either value or register_values is required for MANUAL mode",
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 
 	case "TRIGGER":
 		// TRIGGER mode: use preset_value from parameter (for workflow triggering PRESET parameters)
 		// GUARD: Only valid for PRESET write_mode parameters
 		if param.WriteMode == nil || *param.WriteMode != "PRESET" {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   "TRIGGER mode can only be used for parameters with write_mode=PRESET",
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 
 		// GUARD: Prevent value from being sent in TRIGGER mode
 		if req.Value != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   "TRIGGER mode cannot accept value, use preset_value from parameter",
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 
 		if param.PresetValue == nil || *param.PresetValue == "" {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   "Parameter has no preset_value for TRIGGER mode",
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 
 		// Parse preset_value from parameter
 		// Format: JSON string containing value or register_values
 		var presetData map[string]interface{}
 		if err := json.Unmarshal([]byte(*param.PresetValue), &presetData); err != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Invalid preset_value format: %v", err),
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 
 		// Check if it's scalar or raw register format
 		if value, ok := presetData["value"].(float64); ok {
 			// Scalar value
 			writeValue = value
+			logValue = &value // Store for logging (value from preset_value)
 			log.Infof("Write TRIGGER mode for parameter %d: using preset_value (scalar)=%f", parameterID, writeValue)
 		} else if regValues, ok := presetData["register_values"].([]interface{}); ok {
 			// Raw register values
@@ -258,18 +297,20 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 
 			// Validate length matches quantity
 			if len(registerValues) != getQuantity() {
-				return &WriteResponse{
+				resp := &WriteResponse{
 					Success: false,
 					Error:   fmt.Sprintf("Preset register_values length (%d) must match quantity (%d)", len(registerValues), getQuantity()),
-				}, nil
+				}
+				return logErrorAndReturn(resp)
 			}
 
 			log.Infof("Write TRIGGER mode for parameter %d: using preset_value (registers)=%v", parameterID, registerValues)
 		} else {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   "Invalid preset_value format: must contain 'value' or 'register_values'",
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 
 	case "PRESET":
@@ -360,19 +401,21 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 			getQuantity(),
 		)
 		if err != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Failed to encode value to registers: %v", err),
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 	}
 
 	// Validate register values length matches quantity
 	if len(registerValues) != getQuantity() {
-		return &WriteResponse{
+		resp := &WriteResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Register values length (%d) must match quantity (%d)", len(registerValues), getQuantity()),
-		}, nil
+		}
+		return logErrorAndReturn(resp)
 	}
 
 	// 8. Create Modbus client and write
@@ -382,10 +425,11 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 		slaveID := getSlaveID()
 		rtuClient, err := modbus.NewRTUClient(device, &slaveID)
 		if err != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Failed to create Modbus RTU client: %v", err),
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 		defer rtuClient.Close()
 		client = rtuClient
@@ -394,10 +438,11 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 		slaveID := getSlaveID()
 		tcpClient, err := modbus.NewTCPClient(device, &slaveID)
 		if err != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Failed to create Modbus TCP client: %v", err),
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 		defer tcpClient.Close()
 		client = tcpClient
@@ -410,58 +455,65 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 	switch fc {
 	case 5: // Write Single Coil
 		if len(registerValues) != 1 {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Write Single Coil requires exactly 1 value, got %d", len(registerValues)),
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 		err = client.WriteSingleCoil(ctx, address, registerValues[0])
 		if err != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Failed to write single coil: %v", err),
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 
 	case 15: // Write Multiple Coils
 		err = client.WriteMultipleCoils(ctx, address, registerValues)
 		if err != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Failed to write multiple coils: %v", err),
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 
 	case 6: // Write Single Register
 		if len(registerValues) != 1 {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Write Single Register requires exactly 1 value, got %d", len(registerValues)),
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 		// Use WriteMultipleRegisters with quantity=1 for single register
 		err = client.WriteMultipleRegisters(ctx, address, registerValues)
 		if err != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Failed to write single register: %v", err),
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 
 	case 16: // Write Multiple Registers
 		err = client.WriteMultipleRegisters(ctx, address, registerValues)
 		if err != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Failed to write multiple registers: %v", err),
-			}, nil
+			}
+			return logErrorAndReturn(resp)
 		}
 
 	default:
-		return &WriteResponse{
+		resp := &WriteResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Unsupported function code for write: %d", fc),
-		}, nil
+		}
+		return logErrorAndReturn(resp)
 	}
 
 	// Log success message based on function code
@@ -544,6 +596,24 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 	// 13. Trigger formula engine (reactive evaluation)
 	if s.formulaEngine != nil {
 		s.formulaEngine.OnRawParameterUpdated(parameterID, &realtimeData)
+	}
+
+	// 14. Determine triggered_by and workflow info
+	triggeredBy := "API"
+	if req.WorkflowID != nil {
+		triggeredBy = "WORKFLOW"
+	}
+
+	// 15. Log write action to log database
+	writeLog := s.createWriteLog(parameterID, param, device, req, &WriteResponse{
+		Success:       true,
+		Message:       "Write successful",
+		ReadBackValue: readBackValue,
+	}, nil, triggeredBy, logValue)
+	if s.writeLogRepo != nil {
+		if err := s.writeLogRepo.Create(writeLog); err != nil {
+			log.Warnf("Failed to write log: %v", err)
+		}
 	}
 
 	return &WriteResponse{
@@ -710,4 +780,73 @@ type Client interface {
 	WriteMultipleCoils(ctx context.Context, address uint16, values []uint16) error
 	WriteSingleCoil(ctx context.Context, address uint16, value uint16) error
 	Close() error
+}
+
+// createWriteLog creates a WriteLog entry from write operation details
+func (s *WriteService) createWriteLog(
+	parameterID uint,
+	param *domain.Parameter,
+	device *domain.Koneksi,
+	req WriteRequest,
+	resp *WriteResponse,
+	errMsg *string,
+	triggeredBy string,
+	logValue *float64, // Optional value for logging (used for TRIGGER mode preset_value)
+) *domain.WriteLog {
+	writeLog := &domain.WriteLog{
+		ParameterID: parameterID,
+		WriteMode:   req.Mode,
+		Success:     resp.Success,
+		Message:     resp.Message,
+		TriggeredBy: triggeredBy,
+		CreatedAt:   time.Now(),
+	}
+
+	// Set parameter info
+	if param != nil {
+		writeLog.ParameterNama = param.Nama
+		writeLog.DeviceID = param.DeviceID
+	}
+
+	// Set device info
+	if device != nil {
+		writeLog.DeviceNama = device.Nama
+	}
+
+	// Set workflow info
+	if req.WorkflowID != nil {
+		writeLog.WorkflowID = req.WorkflowID
+		if req.WorkflowNama != nil {
+			writeLog.WorkflowNama = req.WorkflowNama
+		}
+	}
+
+	// Set value (prioritize logValue for TRIGGER mode, then req.Value)
+	if logValue != nil {
+		writeLog.Value = logValue
+	} else if req.Value != nil {
+		writeLog.Value = req.Value
+	}
+
+	// Set register values as JSON string
+	if len(req.RegisterValues) > 0 {
+		regValuesJSON, _ := json.Marshal(req.RegisterValues)
+		writeLog.RegisterValues = string(regValuesJSON)
+	}
+
+	// Set error
+	if errMsg != nil {
+		writeLog.Error = errMsg
+	} else if !resp.Success && resp.Error != "" {
+		writeLog.Error = &resp.Error
+	}
+
+	// Set read back value
+	if resp.ReadBackValue != nil {
+		if val, ok := resp.ReadBackValue.(float64); ok {
+			writeLog.ReadBackValue = &val
+		}
+	}
+
+	return writeLog
 }

@@ -48,11 +48,23 @@ func main() {
 	}
 	log.Info("Database initialized")
 
+	// Initialize log database
+	if err := database.InitLogDB(); err != nil {
+		log.Fatalf("Failed to initialize log database: %v", err)
+	}
+	log.Info("Log database initialized")
+
 	// Run migrations
 	if err := runMigrations(); err != nil {
 		log.Fatalf("Failed to run migrations: %v", err)
 	}
 	log.Info("Migrations completed")
+
+	// Run log database migrations
+	if err := runLogMigrations(); err != nil {
+		log.Fatalf("Failed to run log database migrations: %v", err)
+	}
+	log.Info("Log database migrations completed")
 
 	// Initialize cache
 	cacheInstance, err := cache.Init()
@@ -71,6 +83,7 @@ func main() {
 	presetRepo := repository.NewPresetRepository()
 	workflowRepo := repository.NewWorkflowRepository(database.GetDB())
 	alarmRepo := repository.NewAlarmRepository(database.GetDB())
+	writeLogRepo := repository.NewWriteLogRepository()
 
 	// Initialize services
 	deviceService := service.NewDeviceService(deviceRepo)
@@ -138,6 +151,7 @@ func main() {
 		deviceRepo,
 		cacheInstance,
 		formulaEngine,
+		writeLogRepo,
 	)
 
 	// Initialize Workflow Engine (pass wsHub for alarm notifications)
@@ -219,6 +233,7 @@ func main() {
 		workflowEngine,
 		formulaEngine,
 		alarmRepo,
+		writeLogRepo,
 	)
 	log.Info("Routes configured successfully")
 
@@ -282,6 +297,19 @@ func runMigrations() error {
 		&domain.Threshold{},
 		&domain.WorkflowState{},
 		&domain.CurrentAlarm{},
+	); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func runLogMigrations() error {
+	logDB := database.GetLogDB()
+
+	// Auto-migrate log tables
+	if err := logDB.AutoMigrate(
+		&domain.WriteLog{},
 	); err != nil {
 		return err
 	}

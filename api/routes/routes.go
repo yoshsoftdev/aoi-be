@@ -28,6 +28,7 @@ func SetupRoutes(
 	workflowEngine *service.WorkflowEngine,
 	formulaEngine *service.FormulaEngine,
 	alarmRepo repository.AlarmRepository,
+	writeLogRepo repository.WriteLogRepository,
 ) *gin.Engine {
 	router := gin.Default()
 
@@ -68,6 +69,7 @@ func SetupRoutes(
 		presetRepo := repository.NewPresetRepository()
 		deviceRepo := repository.NewDeviceRepository()
 		thresholdRepo := repository.NewThresholdRepository()
+		// Use the shared writeLogRepo instance (passed from main.go)
 		// Use the shared formulaEngine instance (passed from main.go)
 		writeService := service.NewWriteService(
 			paramRepo,
@@ -77,6 +79,7 @@ func SetupRoutes(
 			deviceRepo,
 			cache,
 			formulaEngine,
+			writeLogRepo,
 		)
 		paramHandler := handlers.NewParameterHandler(paramService, writeService, schedulerManager, formulaEngine)
 		params := v1.Group("/parameters")
@@ -190,6 +193,17 @@ func SetupRoutes(
 			alarms.GET("", alarmHandler.GetAll)                    // GET /api/v1/alarms (get all current alarms)
 			alarms.DELETE("/:id", alarmHandler.DeleteByID)         // DELETE /api/v1/alarms/:id (delete alarm by ID)
 			alarms.DELETE("/workflow/:workflow_id", alarmHandler.DeleteByWorkflowID) // DELETE /api/v1/alarms/workflow/:workflow_id (delete alarm by workflow ID)
+		}
+
+		// Write Logs
+		writeLogHandler := handlers.NewWriteLogHandler(writeLogRepo)
+		writeLogs := v1.Group("/write-logs")
+		{
+			writeLogs.GET("", writeLogHandler.GetAll)                                    // GET /api/v1/write-logs?limit=100
+			writeLogs.GET("/:id", writeLogHandler.GetByID)                               // GET /api/v1/write-logs/:id
+			writeLogs.GET("/parameter/:parameter_id", writeLogHandler.GetByParameterID)  // GET /api/v1/write-logs/parameter/:parameter_id?limit=50
+			writeLogs.GET("/workflow/:workflow_id", writeLogHandler.GetByWorkflowID)     // GET /api/v1/write-logs/workflow/:workflow_id?limit=50
+			writeLogs.GET("/date-range", writeLogHandler.GetByDateRange)                 // GET /api/v1/write-logs/date-range?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD&limit=100
 		}
 	}
 
