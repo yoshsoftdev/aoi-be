@@ -15,10 +15,10 @@ import (
 )
 
 const (
-	// Batch configuration for optimized broadcasting
-	batchWindowMs    = 50   // Collect updates for 50ms before sending batch
-	maxBatchSize     = 100  // Maximum parameters per batch message
-	broadcastBufSize = 1024 // Increased buffer size for high throughput
+	// Batch configuration for optimized broadcasting (aggressively optimized for speed)
+	batchWindowMs    = 0    // Immediate send (no batching delay) for fastest possible broadcast
+	maxBatchSize     = 20   // Smaller batch size for faster flush
+	broadcastBufSize = 2048 // Increased buffer size for high throughput
 )
 
 type WebSocketHub struct {
@@ -80,22 +80,21 @@ func (h *WebSocketHub) Run() {
 				continue
 			}
 
-			// Log broadcast details (only for single updates, batch logs separately)
-			var msgData map[string]interface{}
-			if err := json.Unmarshal(message, &msgData); err == nil {
-				if data, ok := msgData["data"].(map[string]interface{}); ok {
-					// Check if this is a batch update
-					if _, isBatch := msgData["batch"]; isBatch {
-						if dataArray, ok := data["updates"].([]interface{}); ok {
-							logger.GetLogger().Debugf("[BROADCAST] Sending batch to %d clients: %d parameters", clientCount, len(dataArray))
-						}
-					} else {
-						// Single update - only log at debug level to reduce overhead
-						logger.GetLogger().Debugf("[BROADCAST] Sending to %d clients: parameter_id=%v, type=%v",
-							clientCount, data["parameter_id"], msgData["type"])
-					}
-				}
-			}
+			// Logging disabled for performance - too frequent for production
+			// Uncomment below for debugging if needed
+			// var msgData map[string]interface{}
+			// if err := json.Unmarshal(message, &msgData); err == nil {
+			// 	if data, ok := msgData["data"].(map[string]interface{}); ok {
+			// 		if _, isBatch := msgData["batch"]; isBatch {
+			// 			if dataArray, ok := data["updates"].([]interface{}); ok {
+			// 				logger.GetLogger().Debugf("[BROADCAST] Sending batch to %d clients: %d parameters", clientCount, len(dataArray))
+			// 			}
+			// 		} else {
+			// 			logger.GetLogger().Debugf("[BROADCAST] Sending to %d clients: parameter_id=%v, type=%v",
+			// 				clientCount, data["parameter_id"], msgData["type"])
+			// 		}
+			// 	}
+			// }
 
 			// Send message to all clients in parallel
 			h.sendToClientsParallel(clients, message)
@@ -126,9 +125,9 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 		data.RawValue = nil // Force remove raw value
 	}
 
-	// Reduced logging overhead - only log at debug level for frequent broadcasts
-	log.Debugf("[BROADCAST] Queueing CLEAN data: parameter_id=%d, parameter_nama=%s, clean_value=%v",
-		data.ParameterID, data.ParameterNama, data.ProcessedValue)
+	// Logging disabled for performance - too frequent for production
+	// log.Debugf("[BROADCAST] Queueing CLEAN data: parameter_id=%d, parameter_nama=%s, clean_value=%v",
+	// 	data.ParameterID, data.ParameterNama, data.ProcessedValue)
 
 	// Create DashboardData payload compatible with frontend
 	// Frontend expects: parameter_id, device_nama, parameter_nama, value, timestamp, status
@@ -254,26 +253,27 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 // processBatches collects parameter updates and sends them in batches
 // This significantly reduces WebSocket overhead when broadcasting many parameters
 func (h *WebSocketHub) processBatches() {
-	for {
-		select {
-		case update := <-h.batchUpdates:
-			h.batchMu.Lock()
-			h.batchBuffer = append(h.batchBuffer, update)
-			batchSize := len(h.batchBuffer)
+	for update := range h.batchUpdates {
+		h.batchMu.Lock()
+		h.batchBuffer = append(h.batchBuffer, update)
+		batchSize := len(h.batchBuffer)
 
-			// If batch is full, send immediately
-			if batchSize >= maxBatchSize {
-				h.batchMu.Unlock()
-				h.flushBatch()
-			} else {
-				// Start timer for first item in batch if not already started
-				if h.batchTimer == nil {
-					h.batchTimer = time.AfterFunc(batchWindowMs*time.Millisecond, func() {
-						h.flushBatch()
-					})
-				}
-				h.batchMu.Unlock()
+		// If batch is full, send immediately
+		if batchSize >= maxBatchSize {
+			h.batchMu.Unlock()
+			h.flushBatch()
+		} else if batchWindowMs == 0 {
+			// Immediate send if batchWindowMs is 0 (no batching delay)
+			h.batchMu.Unlock()
+			h.flushBatch()
+		} else {
+			// Start timer for first item in batch if not already started
+			if h.batchTimer == nil {
+				h.batchTimer = time.AfterFunc(batchWindowMs*time.Millisecond, func() {
+					h.flushBatch()
+				})
 			}
+			h.batchMu.Unlock()
 		}
 	}
 }
@@ -345,7 +345,8 @@ func (h *WebSocketHub) flushBatch() {
 		return
 	}
 
-	logger.GetLogger().Debugf("[BROADCAST] Flushing batch: %d parameters, %d bytes", len(updates), len(bytes))
+	// Logging disabled for performance - uncomment for debugging
+	// logger.GetLogger().Debugf("[BROADCAST] Flushing batch: %d parameters, %d bytes", len(updates), len(bytes))
 	h.broadcast <- bytes
 }
 
@@ -462,9 +463,10 @@ func (h *WebSocketHub) sendToClientsParallel(clients []*websocket.Conn, message 
 
 	wg.Wait()
 
-	if sentCount > 0 {
-		logger.GetLogger().Debugf("[BROADCAST] Successfully sent to %d/%d clients", sentCount, len(clients))
-	}
+	// Logging disabled for performance - uncomment for debugging
+	// if sentCount > 0 {
+	// 	logger.GetLogger().Debugf("[BROADCAST] Successfully sent to %d/%d clients", sentCount, len(clients))
+	// }
 }
 
 func (h *WebSocketHub) BroadcastError(data domain.RealtimeData) {

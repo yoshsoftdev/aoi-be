@@ -398,26 +398,26 @@ func (s *SchedulerManager) loadAndScheduleAll() {
 // Each SNMP parameter gets its own cron job that runs independently
 func (s *SchedulerManager) scheduleSNMPJob(job PollingJob) {
 	log := logger.GetLogger()
-	
+
 	// Convert polling interval to cron expression
 	// pollingMs is in milliseconds, convert to seconds for cron
 	pollingSeconds := job.PollingMs / 1000
 	if pollingSeconds < 1 {
 		pollingSeconds = 1 // Minimum 1 second
 	}
-	
+
 	// Create cron expression: every N seconds
 	// Format: "*/N * * * * *" (every N seconds)
 	cronExpr := fmt.Sprintf("*/%d * * * * *", pollingSeconds)
-	
+
 	// Capture job variables for closure
 	configID := job.ConfigID
 	parameterID := job.ParameterID
 	connectionID := job.ConnectionID
-	
+
 	log.Infof("[SCHEDULER] Scheduling SNMP job: parameter_id=%d, connection_id=%d, config_id=%d, polling_ms=%d, cron=%s",
 		parameterID, connectionID, configID, job.PollingMs, cronExpr)
-	
+
 	// Schedule cron job for this SNMP parameter
 	// CRITICAL: Add panic recovery and semaphore to prevent crashes and resource exhaustion
 	entryID, err := s.cron.AddFunc(cronExpr, func() {
@@ -428,7 +428,7 @@ func (s *SchedulerManager) scheduleSNMPJob(job PollingJob) {
 					parameterID, connectionID, configID, r)
 			}
 		}()
-		
+
 		// Acquire semaphore to limit concurrent SNMP requests
 		// This prevents resource exhaustion when many SNMP parameters are polled simultaneously
 		select {
@@ -443,14 +443,14 @@ func (s *SchedulerManager) scheduleSNMPJob(job PollingJob) {
 				parameterID, connectionID, configID)
 			return
 		}
-		
-		// Create context with timeout
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+		// Create context with timeout (reduced to 1s for fastest error detection and polling)
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
-		
+
 		log.Debugf("[SNMP-PARALLEL] Executing SNMP poll: parameter_id=%d, connection_id=%d, config_id=%d",
 			parameterID, connectionID, configID)
-		
+
 		// Execute SNMP poll with error handling
 		if err := s.snmpWorker.Execute(ctx, configID); err != nil {
 			log.Warnf("[SNMP-PARALLEL] SNMP poll failed: parameter_id=%d, connection_id=%d, error=%v",
@@ -460,12 +460,12 @@ func (s *SchedulerManager) scheduleSNMPJob(job PollingJob) {
 				parameterID, connectionID)
 		}
 	})
-	
+
 	if err != nil {
 		log.Errorf("[SCHEDULER] Failed to schedule SNMP job: parameter_id=%d, error=%v", parameterID, err)
 		return
 	}
-	
+
 	// Store entry ID for later removal during reload
 	s.snmpJobsMu.Lock()
 	s.snmpJobs[parameterID] = entryID

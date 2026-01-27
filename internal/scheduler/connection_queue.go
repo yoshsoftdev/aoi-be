@@ -126,7 +126,8 @@ func (cq *ConnectionQueue) StartWorker() {
 			log.Infof("[QUEUE] Executing job: connection_id=%d, connection_name=%s, job_type=%s, config_id=%d, parameter_id=%d, slave_id=%d",
 				cq.connectionID, cq.connectionName, job.Type, job.ConfigID, job.ParameterID, job.SlaveID)
 
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			// Reduced timeout to 1s for fastest error detection and polling
+			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 			startTime := time.Now()
 
 			// Execute job with panic recovery to ensure worker continues even if job panics

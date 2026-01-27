@@ -333,13 +333,12 @@ func (w *ConnectionPollingWorker) pollLoop() {
 		log.Infof("[POLLING] ===== COMPLETED CYCLE #%d: connection_id=%d, all %d parameters polled, finalIndex=%d =====",
 			cycleCount, w.connectionID, totalJobs, finalIndex)
 
-		// CRITICAL: Add small delay between cycles to prevent tight loop
-		// This also helps with debugging - we can see cycle boundaries clearly
+		// Reduced delay between cycles for faster polling (was 100ms, now 10ms)
 		select {
 		case <-w.stopChan:
 			log.Infof("[POLLING] Worker stopped between cycles: connection_id=%d", w.connectionID)
 			return
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(10 * time.Millisecond):
 			// Continue to next cycle
 			log.Debugf("[POLLING] Proceeding to next cycle: connection_id=%d", w.connectionID)
 		}

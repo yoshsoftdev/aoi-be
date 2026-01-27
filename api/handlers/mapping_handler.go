@@ -811,7 +811,7 @@ func extractKoneksiConfig(koneksi *domain.Koneksi, protocol string, config map[s
 		if polling, ok := config["pollingMs"].(float64); ok {
 			koneksi.PollingMs = int(polling)
 		} else {
-			koneksi.PollingMs = 1000 // Default
+			koneksi.PollingMs = 200 // Default 200ms for faster updates
 		}
 
 	case "Modbus RTU":
@@ -854,7 +854,7 @@ func extractKoneksiConfig(koneksi *domain.Koneksi, protocol string, config map[s
 		if polling, ok := config["pollingMs"].(float64); ok {
 			koneksi.PollingMs = int(polling)
 		} else {
-			koneksi.PollingMs = 1000
+			koneksi.PollingMs = 200 // Default 200ms for faster updates
 		}
 
 	case "SNMP":
@@ -869,7 +869,7 @@ func extractKoneksiConfig(koneksi *domain.Koneksi, protocol string, config map[s
 		if polling, ok := config["pollingMs"].(float64); ok {
 			koneksi.PollingMs = int(polling)
 		} else {
-			koneksi.PollingMs = 1000
+			koneksi.PollingMs = 200 // Default 200ms for faster updates
 		}
 	}
 
@@ -910,6 +910,13 @@ func createProtocolConfig(tx *gorm.DB, param *domain.Parameter, paramType string
 			dataType = mapping.DataType
 		}
 
+		// Get polling_ms from connectionConfig or use default 200ms
+		pollingMs := 200 // Default 200ms for faster updates
+		if polling, ok := connectionConfig["pollingMs"].(float64); ok {
+			pollingMs = int(polling)
+		}
+		pollingMsPtr := &pollingMs
+
 		modbusTCP := &domain.ModbusTCP{
 			IDParameter:     param.ID,
 			ReadWrite:       false,
@@ -920,6 +927,7 @@ func createProtocolConfig(tx *gorm.DB, param *domain.Parameter, paramType string
 			ByteOrder:       byteOrder,
 			DataType:        dataType,
 			Scaling:         1.0,
+			PollingMs:       pollingMsPtr, // Set default 200ms
 		}
 
 		if err := tx.Create(modbusTCP).Error; err != nil {
@@ -949,6 +957,13 @@ func createProtocolConfig(tx *gorm.DB, param *domain.Parameter, paramType string
 			dataType = mapping.DataType
 		}
 
+		// Get polling_ms from connectionConfig or use default 200ms
+		pollingMs := 200 // Default 200ms for faster updates
+		if polling, ok := connectionConfig["pollingMs"].(float64); ok {
+			pollingMs = int(polling)
+		}
+		pollingMsPtr := &pollingMs
+
 		modbusRTU := &domain.ModbusRTU{
 			IDParameter:     param.ID,
 			ReadWrite:       false,
@@ -959,6 +974,7 @@ func createProtocolConfig(tx *gorm.DB, param *domain.Parameter, paramType string
 			ByteOrder:       byteOrder,
 			DataType:        dataType,
 			Scaling:         1.0,
+			PollingMs:       pollingMsPtr, // Set default 200ms
 		}
 
 		if err := tx.Create(modbusRTU).Error; err != nil {
@@ -997,7 +1013,7 @@ func createProtocolConfig(tx *gorm.DB, param *domain.Parameter, paramType string
 			port = int(p)
 		}
 
-		pollingMs := 1000 // Default
+		pollingMs := 200 // Default 200ms for faster updates
 		if polling, ok := connectionConfig["pollingMs"].(float64); ok {
 			pollingMs = int(polling)
 		}

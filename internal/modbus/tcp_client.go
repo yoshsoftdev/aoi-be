@@ -39,7 +39,9 @@ func NewTCPClient(device *domain.Device, slaveID *int) (*TCPClient, error) {
 	handler := modbus.NewTCPClientHandler(address)
 	handler.SlaveId = byte(finalSlaveID)
 
-	timeout := 5 * time.Second
+	// Default timeout: 150ms (aggressively optimized for fastest TCP polling)
+	// Can be overridden via device.TimeoutMs
+	timeout := 150 * time.Millisecond
 	if device.TimeoutMs > 0 {
 		timeout = time.Duration(device.TimeoutMs) * time.Millisecond
 	}

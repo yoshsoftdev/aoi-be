@@ -69,7 +69,9 @@ func NewRTUClient(device *domain.Device, slaveID *int) (*RTUClient, error) {
 	}
 	handler.SlaveId = byte(finalSlaveID)
 
-	timeout := 5 * time.Second
+	// Default timeout: 200ms (aggressively optimized for fastest polling)
+	// Can be overridden via device.TimeoutMs
+	timeout := 200 * time.Millisecond
 	if device.TimeoutMs > 0 {
 		timeout = time.Duration(device.TimeoutMs) * time.Millisecond
 	}
