@@ -225,6 +225,11 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 		"alarmstatus":    alarmStatus,                         // Alarm status (never empty, defaults to "normal")
 	}
 
+	// Add direction if available
+	if data.Direction != "" {
+		dashboardData["direction"] = data.Direction
+	}
+
 	// Format single message: {"data":{...},"type":"data_update"}
 	// Urutan field: data, type (sesuai contoh di ws-respon.md)
 	message := map[string]interface{}{
@@ -417,7 +422,7 @@ func (h *WebSocketHub) prepareDashboardData(data domain.RealtimeData) map[string
 		roundedValue = finalValue
 	}
 
-	return map[string]interface{}{
+	result := map[string]interface{}{
 		"parameter_id":   data.ParameterID,
 		"device_nama":    data.DeviceNama,
 		"parameter_nama": data.ParameterNama,
@@ -426,6 +431,13 @@ func (h *WebSocketHub) prepareDashboardData(data domain.RealtimeData) map[string
 		"status":         status,
 		"alarmstatus":    alarmStatus,
 	}
+
+	// Add direction if available
+	if data.Direction != "" {
+		result["direction"] = data.Direction
+	}
+
+	return result
 }
 
 // sendToClientsParallel sends message to all clients in parallel using goroutines

@@ -166,6 +166,7 @@ func (h *WriteHandler) Execute(c *gin.Context) {
 
 // TestWriteRequest represents a test write request without parameter_id
 type TestWriteRequest struct {
+	ParameterID     *uint    `json:"parameter_id,omitempty"` // Optional: if provided, log will be saved to DB
 	DeviceID        uint     `json:"device_id" binding:"required"`
 	Protocol        string   `json:"protocol" binding:"required,oneof=modbus_rtu modbus_tcp"`
 	SlaveID         int      `json:"slave_id" binding:"required,min=1,max=247"`
@@ -255,8 +256,8 @@ func (h *WriteHandler) TestWrite(c *gin.Context) {
 		RegisterValues:  req.RegisterValues,
 	}
 
-	// Execute test write
-	result, err := h.writeService.TestWrite(c.Request.Context(), config)
+	// Execute test write (pass parameterID if provided for logging)
+	result, err := h.writeService.TestWrite(c.Request.Context(), config, req.ParameterID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, ExecuteWriteResponse{
 			Success: false,

@@ -315,6 +315,7 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 			Status:         "online",
 			Error:          nil,
 			AlarmStatus:    domain.AlarmStatusNormal, // Default to normal
+			Direction:      param.Direction,           // Include parameter direction
 		}
 
 		// Apply threshold to calculate alarm status

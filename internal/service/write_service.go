@@ -109,12 +109,12 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 		return logErrorAndReturn(resp)
 	}
 
-	// 3. GUARD: Only WRITE parameters can be written to
-	// Direction must be 'WRITE' (new field) or read_write must be true (legacy)
-	if param.Direction != "WRITE" && !param.ReadWrite {
+	// 3. GUARD: Only WRITE and READ_WRITE parameters can be written to
+	// Direction must be 'WRITE' or 'READ_WRITE' (new field) or read_write must be true (legacy)
+	if param.Direction != "WRITE" && param.Direction != "READ_WRITE" && !param.ReadWrite {
 		resp := &WriteResponse{
 			Success: false,
-			Error:   "Parameter is not writable. Only parameters with direction=WRITE can be written to",
+			Error:   "Parameter is not writable. Only parameters with direction=WRITE or direction=READ_WRITE can be written to",
 		}
 		return logErrorAndReturn(resp)
 	}
@@ -638,24 +638,48 @@ type TestWriteConfig struct {
 
 // TestWrite executes a test write operation without creating a parameter in database
 // This is used for testing write capability before saving parameter configuration
-func (s *WriteService) TestWrite(ctx context.Context, config TestWriteConfig) (*WriteResponse, error) {
+// If parameterID is provided, the write operation will be logged to the database
+func (s *WriteService) TestWrite(ctx context.Context, config TestWriteConfig, parameterID *uint) (*WriteResponse, error) {
 	log := logger.GetLogger()
+
+	// Helper function to log error to database
+	logErrorToDB := func(resp *WriteResponse) {
+		if parameterID != nil && s.writeLogRepo != nil {
+			if param, err := s.paramRepo.GetByID(*parameterID); err == nil {
+				device, _ := s.deviceRepo.GetByID(config.DeviceID)
+				var logValue *float64
+				if len(config.RegisterValues) > 0 {
+					val := float64(config.RegisterValues[0])
+					logValue = &val
+				}
+				errorMsg := resp.Error
+				writeLog := s.createWriteLog(*parameterID, param, device, WriteRequest{Mode: "MANUAL"}, resp, &errorMsg, "MANUAL", logValue)
+				if err := s.writeLogRepo.Create(writeLog); err != nil {
+					log.Warnf("Failed to save test write error log: %v", err)
+				}
+			}
+		}
+	}
 
 	// 1. Get device
 	device, err := s.deviceRepo.GetByID(config.DeviceID)
 	if err != nil {
-		return &WriteResponse{
+		resp := &WriteResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Device not found: %v", err),
-		}, nil
+		}
+		logErrorToDB(resp)
+		return resp, nil
 	}
 
 	// 2. Validate register values length matches quantity
 	if len(config.RegisterValues) != config.Quantity {
-		return &WriteResponse{
+		resp := &WriteResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Register values length (%d) must match quantity (%d)", len(config.RegisterValues), config.Quantity),
-		}, nil
+		}
+		logErrorToDB(resp)
+		return resp, nil
 	}
 
 	// 3. Create Modbus client
@@ -664,10 +688,12 @@ func (s *WriteService) TestWrite(ctx context.Context, config TestWriteConfig) (*
 	case "modbus_rtu":
 		rtuClient, err := modbus.NewRTUClient(device, &config.SlaveID)
 		if err != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Failed to create Modbus RTU client: %v", err),
-			}, nil
+			}
+			logErrorToDB(resp)
+			return resp, nil
 		}
 		defer rtuClient.Close()
 		client = rtuClient
@@ -675,19 +701,23 @@ func (s *WriteService) TestWrite(ctx context.Context, config TestWriteConfig) (*
 	case "modbus_tcp":
 		tcpClient, err := modbus.NewTCPClient(device, &config.SlaveID)
 		if err != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Failed to create Modbus TCP client: %v", err),
-			}, nil
+			}
+			logErrorToDB(resp)
+			return resp, nil
 		}
 		defer tcpClient.Close()
 		client = tcpClient
 
 	default:
-		return &WriteResponse{
+		resp := &WriteResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Unsupported protocol: %s", config.Protocol),
-		}, nil
+		}
+		logErrorToDB(resp)
+		return resp, nil
 	}
 
 	// 4. Write based on function code
@@ -697,58 +727,72 @@ func (s *WriteService) TestWrite(ctx context.Context, config TestWriteConfig) (*
 	switch fc {
 	case 5: // Write Single Coil
 		if len(config.RegisterValues) != 1 {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Write Single Coil requires exactly 1 value, got %d", len(config.RegisterValues)),
-			}, nil
+			}
+			logErrorToDB(resp)
+			return resp, nil
 		}
 		err = client.WriteSingleCoil(ctx, address, config.RegisterValues[0])
 		if err != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Failed to write single coil: %v", err),
-			}, nil
+			}
+			logErrorToDB(resp)
+			return resp, nil
 		}
 
 	case 15: // Write Multiple Coils
 		err = client.WriteMultipleCoils(ctx, address, config.RegisterValues)
 		if err != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Failed to write multiple coils: %v", err),
-			}, nil
+			}
+			logErrorToDB(resp)
+			return resp, nil
 		}
 
 	case 6: // Write Single Register
 		if len(config.RegisterValues) != 1 {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Write Single Register requires exactly 1 value, got %d", len(config.RegisterValues)),
-			}, nil
+			}
+			logErrorToDB(resp)
+			return resp, nil
 		}
 		// Use WriteMultipleRegisters with quantity=1 for single register
 		err = client.WriteMultipleRegisters(ctx, address, config.RegisterValues)
 		if err != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Failed to write single register: %v", err),
-			}, nil
+			}
+			logErrorToDB(resp)
+			return resp, nil
 		}
 
 	case 16: // Write Multiple Registers
 		err = client.WriteMultipleRegisters(ctx, address, config.RegisterValues)
 		if err != nil {
-			return &WriteResponse{
+			resp := &WriteResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Failed to write multiple registers: %v", err),
-			}, nil
+			}
+			logErrorToDB(resp)
+			return resp, nil
 		}
 
 	default:
-		return &WriteResponse{
+		resp := &WriteResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Unsupported function code for write: %d", fc),
-		}, nil
+		}
+		logErrorToDB(resp)
+		return resp, nil
 	}
 
 	// Log success message based on function code
@@ -767,10 +811,46 @@ func (s *WriteService) TestWrite(ctx context.Context, config TestWriteConfig) (*
 			config.DeviceID, config.SlaveID, config.RegisterAddress, config.Quantity)
 	}
 
-	return &WriteResponse{
+	// Build success response
+	successResp := &WriteResponse{
 		Success: true,
 		Message: "Test write successful (no parameter saved)",
-	}, nil
+	}
+
+	// If parameterID is provided, save write log to database
+	if parameterID != nil && s.writeLogRepo != nil {
+		// Get parameter for logging
+		param, err := s.paramRepo.GetByID(*parameterID)
+		if err == nil {
+			// Calculate scalar value from register values for logging
+			var logValue *float64
+			if len(config.RegisterValues) > 0 {
+				val := float64(config.RegisterValues[0])
+				logValue = &val
+			}
+
+			// Create write log entry
+			writeLog := s.createWriteLog(
+				*parameterID,
+				param,
+				device,
+				WriteRequest{
+					Mode: "MANUAL", // Test write is treated as MANUAL
+				},
+				successResp,
+				nil,
+				"MANUAL",
+				logValue,
+			)
+
+			// Save to database
+			if err := s.writeLogRepo.Create(writeLog); err != nil {
+				log.Warnf("Failed to save test write log: %v", err)
+			}
+		}
+	}
+
+	return successResp, nil
 }
 
 // Client interface for Modbus clients

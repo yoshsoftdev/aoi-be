@@ -360,7 +360,7 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 		log.Infof("WorkflowEngine: TRIGGER_WRITE action successful: workflow=%d, parameter=%d", workflowID, *action.ParameterID)
 
 	case "WRITE_WITH_VALUE":
-		// WRITE_WITH_VALUE: write DYNAMIC parameter (value required)
+		// WRITE_WITH_VALUE: write DYNAMIC parameter or READ_WRITE parameter (value required)
 		if action.ParameterID == nil {
 			return fmt.Errorf("parameter_id is required for WRITE_WITH_VALUE action")
 		}
@@ -368,23 +368,31 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 			return fmt.Errorf("value is required for WRITE_WITH_VALUE action")
 		}
 
-		// Validate parameter is WRITE type
+		// Validate parameter is WRITE or READ_WRITE type
 		param, err := e.paramRepo.GetByID(*action.ParameterID)
 		if err != nil {
 			return fmt.Errorf("failed to get parameter %d: %w", *action.ParameterID, err)
 		}
 
-		if param.Direction != "WRITE" {
-			return fmt.Errorf("parameter %d is not a WRITE parameter", *action.ParameterID)
+		// Allow WRITE and READ_WRITE parameters (READ_WRITE is treated as write dynamic)
+		if param.Direction != "WRITE" && param.Direction != "READ_WRITE" {
+			return fmt.Errorf("parameter %d is not a WRITE or READ_WRITE parameter", *action.ParameterID)
 		}
 
-		// Validate write_mode is DYNAMIC
-		if param.WriteMode == nil || *param.WriteMode != "DYNAMIC" {
-			return fmt.Errorf("parameter %d is not a DYNAMIC parameter (write_mode must be DYNAMIC for WRITE_WITH_VALUE)", *action.ParameterID)
+		// For WRITE parameters, validate write_mode is DYNAMIC
+		// For READ_WRITE parameters, treat as DYNAMIC (no write_mode validation needed)
+		if param.Direction == "WRITE" {
+			if param.WriteMode == nil || *param.WriteMode != "DYNAMIC" {
+				return fmt.Errorf("parameter %d is not a DYNAMIC parameter (write_mode must be DYNAMIC for WRITE_WITH_VALUE)", *action.ParameterID)
+			}
 		}
 
 		// Execute write via WriteService
-		log.Infof("WorkflowEngine: Executing WRITE_WITH_VALUE action: workflow=%d, parameter=%d, value=%f (DYNAMIC)", workflowID, *action.ParameterID, *action.Value)
+		paramType := "DYNAMIC"
+		if param.Direction == "READ_WRITE" {
+			paramType = "READ_WRITE (treated as DYNAMIC)"
+		}
+		log.Infof("WorkflowEngine: Executing WRITE_WITH_VALUE action: workflow=%d, parameter=%d, value=%f (%s)", workflowID, *action.ParameterID, *action.Value, paramType)
 
 		ctx := context.Background()
 		workflowNama := workflow.Nama
@@ -421,12 +429,13 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 			return fmt.Errorf("failed to get parameter %d: %w", *action.ParameterID, err)
 		}
 
-		if param.Direction != "WRITE" {
-			return fmt.Errorf("parameter %d is not a WRITE parameter", *action.ParameterID)
+		// Allow WRITE and READ_WRITE parameters (READ_WRITE is treated as write dynamic)
+		if param.Direction != "WRITE" && param.Direction != "READ_WRITE" {
+			return fmt.Errorf("parameter %d is not a WRITE or READ_WRITE parameter", *action.ParameterID)
 		}
 
-		// Check write_mode and validate accordingly
-		if param.WriteMode != nil && *param.WriteMode == "PRESET" {
+		// Check write_mode and validate accordingly (only for WRITE parameters)
+		if param.Direction == "WRITE" && param.WriteMode != nil && *param.WriteMode == "PRESET" {
 			return fmt.Errorf("cannot send value to PRESET parameter %d, use TRIGGER_WRITE action instead", *action.ParameterID)
 		}
 

@@ -445,6 +445,7 @@ func (e *FormulaEngine) evaluateFormula(formulaParamID uint, depth int) error {
 		Error:          nil,
 		CustomRumus:    param.Unit, // Temporary: use CustomRumus to pass unit to WebSocketHub
 		AlarmStatus:    domain.AlarmStatusNormal, // Default to normal
+		Direction:      param.Direction,          // Include parameter direction
 	}
 
 	// Apply threshold to calculate alarm status

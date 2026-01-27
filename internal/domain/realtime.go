@@ -14,6 +14,7 @@ type RealtimeData struct {
 	Status         string      `json:"status"` // online, offline, error
 	Error          *string     `json:"error,omitempty"`
 	AlarmStatus    string      `json:"alarmstatus"` // normal, abnormal, warning_low, warning_high, critical_low, critical_high
+	Direction      string      `json:"direction,omitempty"` // READ, WRITE, READ_WRITE
 }
 
 // DashboardData is a simplified structure sent to dashboard via WebSocket

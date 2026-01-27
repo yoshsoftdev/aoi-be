@@ -73,6 +73,11 @@ func (h *SnapsHandler) GetSnaps(c *gin.Context) {
 				"alarmstatus":    cleanData.AlarmStatus,
 				"timestamp":      cleanData.Timestamp,
 			}
+			
+			// Add direction if available
+			if cleanData.Direction != "" {
+				snapshot["direction"] = cleanData.Direction
+			}
 
 			// Add unit if available
 			if param.Unit != nil {
@@ -97,6 +102,11 @@ func (h *SnapsHandler) GetSnaps(c *gin.Context) {
 				"value":          nil,
 				"status":         "offline",
 				"alarmstatus":    "normal",
+			}
+			
+			// Add direction if available
+			if param.Direction != "" {
+				snapshot["direction"] = param.Direction
 			}
 
 			if param.Unit != nil {

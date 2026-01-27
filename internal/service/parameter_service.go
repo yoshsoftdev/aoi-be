@@ -87,8 +87,8 @@ func (s *parameterService) Create(param *domain.Parameter) error {
 	}
 
 	// Validate direction
-	if param.Direction != "READ" && param.Direction != "WRITE" {
-		return errors.NewValidationError("Invalid direction. Must be 'READ' or 'WRITE'", param.Direction)
+	if param.Direction != "READ" && param.Direction != "WRITE" && param.Direction != "READ_WRITE" {
+		return errors.NewValidationError("Invalid direction. Must be 'READ', 'WRITE', or 'READ_WRITE'", param.Direction)
 	}
 
 	return s.repo.Create(param)

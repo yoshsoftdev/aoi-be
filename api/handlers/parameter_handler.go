@@ -159,10 +159,10 @@ func (h *ParameterHandler) Create(c *gin.Context) {
 		return
 	}
 
-	// Reload scheduler ONLY for READ parameters
+	// Reload scheduler ONLY for READ and READ_WRITE parameters
 	// WRITE parameters are command/on-demand and should NOT be scheduled
-	if h.schedulerManager != nil && param.Direction == "READ" {
-		logger.GetLogger().Info("Reloading scheduler after READ parameter creation")
+	if h.schedulerManager != nil && (param.Direction == "READ" || param.Direction == "READ_WRITE") {
+		logger.GetLogger().Info("Reloading scheduler after READ/READ_WRITE parameter creation")
 		h.schedulerManager.Reload()
 	} else if param.Direction == "WRITE" {
 		logger.GetLogger().Info("WRITE parameter created - skipping scheduler reload (WRITE parameters are not scheduled)")
@@ -273,10 +273,10 @@ func (h *ParameterHandler) Update(c *gin.Context) {
 		return
 	}
 
-	// Reload scheduler ONLY for READ parameters
+	// Reload scheduler ONLY for READ and READ_WRITE parameters
 	// WRITE parameters are command/on-demand and should NOT be scheduled
-	if h.schedulerManager != nil && param.Direction == "READ" {
-		logger.GetLogger().Info("Reloading scheduler after READ parameter update")
+	if h.schedulerManager != nil && (param.Direction == "READ" || param.Direction == "READ_WRITE") {
+		logger.GetLogger().Info("Reloading scheduler after READ/READ_WRITE parameter update")
 		h.schedulerManager.Reload()
 	} else if param.Direction == "WRITE" {
 		logger.GetLogger().Info("WRITE parameter updated - skipping scheduler reload (WRITE parameters are not scheduled)")
