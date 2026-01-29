@@ -78,11 +78,14 @@ func (s *parameterService) Create(param *domain.Parameter) error {
 
 	// Set direction based on read_write if direction is not explicitly set
 	// CRITICAL: direction determines if parameter is scheduled (READ) or command-based (WRITE)
+	// read_write: 0=READ, 1=WRITE, 2=READ_WRITE
 	if param.Direction == "" {
-		if param.ReadWrite {
+		if param.ReadWrite == 1 {
 			param.Direction = "WRITE"
+		} else if param.ReadWrite == 2 {
+			param.Direction = "READ_WRITE"
 		} else {
-			param.Direction = "READ"
+			param.Direction = "READ" // Default to READ for read_write=0 or any other value
 		}
 	}
 

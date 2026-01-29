@@ -155,7 +155,7 @@ func (s *SchedulerManager) loadAndScheduleAll() {
 	var modbusRTUConfigs []domain.ModbusRTU
 	result := s.db.Preload("Parameter.Device").
 		Joins("JOIN parameters ON parameters.id = modbus_rtu.id_parameter").
-		Where("(parameters.direction = ? OR parameters.direction = ? OR (parameters.direction = '' AND parameters.read_write = 0))", "READ", "READ_WRITE").
+		Where("(parameters.direction = ? OR parameters.direction = ? OR (parameters.direction = '' AND (parameters.read_write = 0 OR parameters.read_write = 2)))", "READ", "READ_WRITE").
 		Where("(parameters.parameter_mode = ? OR parameters.parameter_mode = ? OR (parameters.parameter_mode = '' OR parameters.parameter_mode IS NULL))", domain.ParameterModeSOURCE, domain.ParameterModeDIRECT).
 		Find(&modbusRTUConfigs)
 
@@ -217,7 +217,7 @@ func (s *SchedulerManager) loadAndScheduleAll() {
 	var modbusTCPConfigs []domain.ModbusTCP
 	s.db.Preload("Parameter.Device").
 		Joins("JOIN parameters ON parameters.id = modbus_tcp.id_parameter").
-		Where("(parameters.direction = ? OR parameters.direction = ? OR (parameters.direction = '' AND parameters.read_write = 0))", "READ", "READ_WRITE").
+		Where("(parameters.direction = ? OR parameters.direction = ? OR (parameters.direction = '' AND (parameters.read_write = 0 OR parameters.read_write = 2)))", "READ", "READ_WRITE").
 		Where("(parameters.parameter_mode = ? OR parameters.parameter_mode = ? OR (parameters.parameter_mode = '' OR parameters.parameter_mode IS NULL))", domain.ParameterModeSOURCE, domain.ParameterModeDIRECT).
 		Find(&modbusTCPConfigs)
 
@@ -262,7 +262,7 @@ func (s *SchedulerManager) loadAndScheduleAll() {
 	var snmpConfigs []domain.SNMPConfig
 	s.db.Preload("Parameter.Device").
 		Joins("JOIN parameters ON parameters.id = snmp_config.id_parameter").
-		Where("(parameters.direction = ? OR parameters.direction = ? OR (parameters.direction = '' AND parameters.read_write = 0))", "READ", "READ_WRITE").
+		Where("(parameters.direction = ? OR parameters.direction = ? OR (parameters.direction = '' AND (parameters.read_write = 0 OR parameters.read_write = 2)))", "READ", "READ_WRITE").
 		Where("(parameters.parameter_mode = ? OR parameters.parameter_mode = ? OR (parameters.parameter_mode = '' OR parameters.parameter_mode IS NULL))", domain.ParameterModeSOURCE, domain.ParameterModeDIRECT).
 		Find(&snmpConfigs)
 

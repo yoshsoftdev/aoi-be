@@ -1,8 +1,11 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -409,10 +412,23 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 		}
 
 		if !result.Success {
+			// For READ_WRITE parameters, read-back failure is critical
+			if param.Direction == "READ_WRITE" || param.ReadWrite == 2 {
+				return fmt.Errorf("write failed (read-back verification failed for READ_WRITE parameter): %s", result.Error)
+			}
 			return fmt.Errorf("write failed: %s", result.Error)
 		}
 
-		log.Infof("WorkflowEngine: WRITE_WITH_VALUE action successful: workflow=%d, parameter=%d", workflowID, *action.ParameterID)
+		// For READ_WRITE parameters, log read-back success
+		if param.Direction == "READ_WRITE" || param.ReadWrite == 2 {
+			if result.ReadBackValue != nil {
+				log.Infof("WorkflowEngine: WRITE_WITH_VALUE action successful with read-back verification: workflow=%d, parameter=%d, read_back_value=%v", workflowID, *action.ParameterID, result.ReadBackValue)
+			} else {
+				log.Warnf("WorkflowEngine: WRITE_WITH_VALUE action successful but no read-back value: workflow=%d, parameter=%d", workflowID, *action.ParameterID)
+			}
+		} else {
+			log.Infof("WorkflowEngine: WRITE_WITH_VALUE action successful: workflow=%d, parameter=%d", workflowID, *action.ParameterID)
+		}
 
 	case "write":
 		// Legacy support: treat as WRITE_WITH_VALUE
@@ -451,10 +467,23 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 		}
 
 		if !result.Success {
+			// For READ_WRITE parameters, read-back failure is critical
+			if param.Direction == "READ_WRITE" || param.ReadWrite == 2 {
+				return fmt.Errorf("write failed (read-back verification failed for READ_WRITE parameter): %s", result.Error)
+			}
 			return fmt.Errorf("write failed: %s", result.Error)
 		}
 
-		log.Infof("WorkflowEngine: Write action successful: workflow=%d, parameter=%d", workflowID, *action.ParameterID)
+		// For READ_WRITE parameters, log read-back success
+		if param.Direction == "READ_WRITE" || param.ReadWrite == 2 {
+			if result.ReadBackValue != nil {
+				log.Infof("WorkflowEngine: Write action successful with read-back verification: workflow=%d, parameter=%d, read_back_value=%v", workflowID, *action.ParameterID, result.ReadBackValue)
+			} else {
+				log.Warnf("WorkflowEngine: Write action successful but no read-back value: workflow=%d, parameter=%d", workflowID, *action.ParameterID)
+			}
+		} else {
+			log.Infof("WorkflowEngine: Write action successful: workflow=%d, parameter=%d", workflowID, *action.ParameterID)
+		}
 
 	case "event":
 		// TODO: Implement event bus
@@ -517,9 +546,62 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 			log.Warnf("WorkflowEngine: WebSocket broadcaster not available, alarm notification not sent")
 		}
 
+		// Send alarm to external HTTP endpoint
+		go e.sendAlarmToHTTPEndpoint(*action.AlarmMessage, workflowID, workflowName)
+
 	default:
 		return fmt.Errorf("unknown action type: %s", action.ActionType)
 	}
 
 	return nil
+}
+
+// sendAlarmToHTTPEndpoint sends alarm message to external HTTP endpoint
+// This runs in a goroutine to avoid blocking workflow execution
+func (e *WorkflowEngine) sendAlarmToHTTPEndpoint(message string, workflowID uint, workflowName string) {
+	log := logger.GetLogger()
+
+	// HTTP endpoint URL (can be moved to config later)
+	endpointURL := "http://localhost:8085/send"
+
+	// Prepare request payload
+	payload := map[string]string{
+		"message": message,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		log.Errorf("WorkflowEngine: Failed to marshal alarm payload: %v", err)
+		return
+	}
+
+	// Create HTTP request with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", endpointURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Errorf("WorkflowEngine: Failed to create HTTP request for alarm: %v", err)
+		return
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	// Send request
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Errorf("WorkflowEngine: Failed to send alarm to HTTP endpoint %s: %v", endpointURL, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		log.Infof("WorkflowEngine: Alarm sent to HTTP endpoint successfully: workflow=%d (%s), status=%d", workflowID, workflowName, resp.StatusCode)
+	} else {
+		log.Warnf("WorkflowEngine: Alarm sent to HTTP endpoint but received non-2xx status: workflow=%d (%s), status=%d", workflowID, workflowName, resp.StatusCode)
+	}
 }

@@ -302,13 +302,81 @@ func (h *ParameterHandler) Update(c *gin.Context) {
 	})
 }
 
+// UpdateName handles PATCH /api/v1/parameters/:id/name
+// This endpoint is used for simple rename operations (e.g., from dashboard)
+// without touching other critical fields like device_id, type, direction, etc.
+func (h *ParameterHandler) UpdateName(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Invalid parameter ID",
+		})
+		return
+	}
+
+	// Simple request struct for renaming
+	type renameRequest struct {
+		Nama string `json:"nama" binding:"required"`
+	}
+
+	var req renameRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	// Get existing parameter
+	param, err := h.service.GetByID(uint(id))
+	if err != nil {
+		if appErr, ok := err.(*errors.AppError); ok {
+			c.JSON(appErr.Code, gin.H{
+				"success": false,
+				"error":   appErr.Message,
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	// Only update name
+	param.Nama = req.Nama
+
+	if err := h.service.Update(uint(id), param); err != nil {
+		if appErr, ok := err.(*errors.AppError); ok {
+			c.JSON(appErr.Code, gin.H{
+				"success": false,
+				"error":   appErr.Message,
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    param,
+	})
+}
+
 func (h *ParameterHandler) Delete(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"status":  "REJECTED",
-			"reason":  "INVALID_ID",
-			"error":   "Invalid parameter ID",
+			"status": "REJECTED",
+			"reason": "INVALID_ID",
+			"error":  "Invalid parameter ID",
 		})
 		return
 	}
@@ -373,7 +441,7 @@ func (h *ParameterHandler) Delete(c *gin.Context) {
 
 	// Success response
 	c.JSON(http.StatusOK, gin.H{
-		"status":            "OK",
+		"status":               "OK",
 		"deleted_parameter_id": parameterID,
 	})
 }

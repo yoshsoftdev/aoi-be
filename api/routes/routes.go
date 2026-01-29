@@ -92,6 +92,8 @@ func SetupRoutes(
 			// Parameterized routes come after specific routes
 			params.GET("/:id", paramHandler.GetByID)
 			params.PATCH("/:id", paramHandler.Update)
+			// Simple rename endpoint (used by dashboard to avoid full update & FK issues)
+			params.PATCH("/:id/name", paramHandler.UpdateName)
 			params.DELETE("/:id", paramHandler.Delete)
 			params.POST("/:id/write", paramHandler.Write)
 		}

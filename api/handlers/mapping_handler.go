@@ -382,7 +382,7 @@ func (h *MappingHandler) Save(c *gin.Context) {
 			DeviceID:      koneksi.ID,
 			Nama:          mapping.OutputName,
 			Type:          koneksiType,
-			ReadWrite:     false,
+			ReadWrite:     0, // 0=READ
 			IsFormula:     false,
 			ParameterMode: domain.ParameterModeSOURCE, // SOURCE = polling device, internal only, tidak dibroadcast
 		}
@@ -438,7 +438,7 @@ func (h *MappingHandler) Save(c *gin.Context) {
 			DeviceID:      koneksi.ID,
 			Nama:          mapping.OutputName,
 			Type:          koneksiType,
-			ReadWrite:     false,
+			ReadWrite:     0, // 0=READ
 			IsFormula:     false,
 			ParameterMode: domain.ParameterModeDIRECT, // DIRECT = polling device, value already clean, broadcast directly
 		}
@@ -533,7 +533,7 @@ func (h *MappingHandler) Save(c *gin.Context) {
 			DeviceID:      koneksi.ID,
 			Nama:          mapping.OutputName,
 			Type:          "formula",
-			ReadWrite:     false,
+			ReadWrite:     0, // 0=READ
 			IsFormula:     true,
 			ParameterMode: domain.ParameterModeFORMULA, // FORMULA = derived parameter, not polling, broadcast
 		}
@@ -919,7 +919,7 @@ func createProtocolConfig(tx *gorm.DB, param *domain.Parameter, paramType string
 
 		modbusTCP := &domain.ModbusTCP{
 			IDParameter:     param.ID,
-			ReadWrite:       false,
+			ReadWrite:       false, // Modbus config ReadWrite is still boolean (legacy)
 			SlaveID:         slaveID,
 			FunctionCode:    *mapping.FunctionCode,
 			RegisterAddress: *mapping.RegisterAddress,
@@ -966,7 +966,7 @@ func createProtocolConfig(tx *gorm.DB, param *domain.Parameter, paramType string
 
 		modbusRTU := &domain.ModbusRTU{
 			IDParameter:     param.ID,
-			ReadWrite:       false,
+			ReadWrite:       false, // Modbus config ReadWrite is still boolean (legacy)
 			SlaveID:         slaveID,
 			FunctionCode:    *mapping.FunctionCode,
 			RegisterAddress: *mapping.RegisterAddress,

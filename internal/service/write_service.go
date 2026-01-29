@@ -110,8 +110,8 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 	}
 
 	// 3. GUARD: Only WRITE and READ_WRITE parameters can be written to
-	// Direction must be 'WRITE' or 'READ_WRITE' (new field) or read_write must be true (legacy)
-	if param.Direction != "WRITE" && param.Direction != "READ_WRITE" && !param.ReadWrite {
+	// Direction must be 'WRITE' or 'READ_WRITE' (new field) or read_write must be 1 (WRITE) or 2 (READ_WRITE) (legacy)
+	if param.Direction != "WRITE" && param.Direction != "READ_WRITE" && param.ReadWrite != 1 && param.ReadWrite != 2 {
 		resp := &WriteResponse{
 			Success: false,
 			Error:   "Parameter is not writable. Only parameters with direction=WRITE or direction=READ_WRITE can be written to",
@@ -206,6 +206,40 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 			return modbusConfig.Scaling
 		}
 		return modbusTCPConfig.Scaling
+	}
+
+	// Helper to get read function code for read-back verification
+	// For READ_WRITE parameters: function code in config is already for READ (3 or 4)
+	// For WRITE parameters: need to convert write function code to read function code
+	getReadFunctionCode := func() int {
+		configFC := getFunctionCode()
+
+		// For READ_WRITE parameters, function code in config is already for READ
+		// So we can use it directly (it's already 1, 2, 3, or 4)
+		if param.Direction == "READ_WRITE" || param.ReadWrite == 2 {
+			// Config function code is for read, use it directly
+			// But ensure it's a valid read function code (1, 2, 3, or 4)
+			if configFC >= 1 && configFC <= 4 {
+				return configFC
+			}
+			// Fallback to Read Holding Registers if invalid
+			return 3
+		}
+
+		// For WRITE parameters, convert write function code to read function code
+		switch configFC {
+		case 5: // Write Single Coil -> Read Coils
+			return 1
+		case 6: // Write Single Register -> Read Holding Registers
+			return 3
+		case 15: // Write Multiple Coils -> Read Coils
+			return 1
+		case 16: // Write Multiple Registers -> Read Holding Registers
+			return 3
+		default:
+			// Default to Read Holding Registers (function code 3)
+			return 3
+		}
 	}
 
 	// 6. Resolve write value based on mode
@@ -450,9 +484,54 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 
 	// 9. Write based on function code
 	address := uint16(getRegisterAddress())
-	fc := getFunctionCode()
+	configFC := getFunctionCode()
 
-	switch fc {
+	// Determine write function code
+	// For READ_WRITE parameters: config function code is for READ, need to determine write function code
+	// For WRITE parameters: config function code is already for WRITE
+	var writeFC int
+	if param.Direction == "READ_WRITE" || param.ReadWrite == 2 {
+		// READ_WRITE: Convert read function code to write function code based on quantity
+		quantity := getQuantity()
+		switch configFC {
+		case 1: // Read Coils -> Write Coils
+			if quantity == 1 {
+				writeFC = 5 // Write Single Coil
+			} else {
+				writeFC = 15 // Write Multiple Coils
+			}
+		case 2: // Read Discrete Inputs -> Cannot write (discrete inputs are read-only)
+			resp := &WriteResponse{
+				Success: false,
+				Error:   "Cannot write to discrete inputs (function code 2 is read-only)",
+			}
+			return logErrorAndReturn(resp)
+		case 3: // Read Holding Registers -> Write Holding Registers
+			if quantity == 1 {
+				writeFC = 6 // Write Single Register
+			} else {
+				writeFC = 16 // Write Multiple Registers
+			}
+		case 4: // Read Input Registers -> Cannot write (input registers are read-only)
+			resp := &WriteResponse{
+				Success: false,
+				Error:   "Cannot write to input registers (function code 4 is read-only)",
+			}
+			return logErrorAndReturn(resp)
+		default:
+			// Default: assume holding registers
+			if quantity == 1 {
+				writeFC = 6 // Write Single Register
+			} else {
+				writeFC = 16 // Write Multiple Registers
+			}
+		}
+	} else {
+		// WRITE parameter: use function code from config directly
+		writeFC = configFC
+	}
+
+	switch writeFC {
 	case 5: // Write Single Coil
 		if len(registerValues) != 1 {
 			resp := &WriteResponse{
@@ -511,13 +590,13 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 	default:
 		resp := &WriteResponse{
 			Success: false,
-			Error:   fmt.Sprintf("Unsupported function code for write: %d", fc),
+			Error:   fmt.Sprintf("Unsupported function code for write: %d", writeFC),
 		}
 		return logErrorAndReturn(resp)
 	}
 
-	// Log success message based on function code
-	switch fc {
+	// Log success message based on write function code
+	switch writeFC {
 	case 5:
 		log.Infof("Successfully wrote single coil to parameter %d", parameterID)
 	case 15:
@@ -536,42 +615,137 @@ func (s *WriteService) Write(ctx context.Context, parameterID uint, req WriteReq
 		}, nil
 	}
 
-	// 11. Read-back (optional) - read the value we just wrote
+	// 11. Read-back verification
+	// For READ_WRITE parameters: MANDATORY read-back with retry and timeout
+	// For other parameters: Optional read-back (best effort)
 	var readBackValue interface{}
-	readData, err := client.Read(ctx, getFunctionCode(), address, uint16(getQuantity()))
-	if err == nil {
-		// Decode read-back value (similar to worker logic)
-		dataType := getDataType()
-		if dataType == "" {
-			dataType = "uint16"
+	isReadWrite := param.Direction == "READ_WRITE" || param.ReadWrite == 2
+
+	if isReadWrite {
+		// READ_WRITE: MANDATORY read-back with retry and timeout
+		log.Infof("READ_WRITE parameter detected: Performing mandatory read-back verification for parameter %d", parameterID)
+
+		// Small delay after write to allow device to process the write command
+		time.Sleep(50 * time.Millisecond)
+
+		readBackCtx, readBackCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer readBackCancel()
+
+		maxRetries := 3
+		retryDelay := 100 * time.Millisecond
+		var readBackErr error
+
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			// Use read function code (for READ_WRITE, config function code is already for read)
+			readFC := getReadFunctionCode()
+			log.Debugf("READ_WRITE read-back attempt %d/%d: parameter=%d, readFC=%d, address=%d, quantity=%d", attempt, maxRetries, parameterID, readFC, address, getQuantity())
+			readData, err := client.Read(readBackCtx, readFC, address, uint16(getQuantity()))
+			if err == nil {
+				// Decode read-back value (similar to worker logic)
+				dataType := getDataType()
+				if dataType == "" {
+					dataType = "uint16"
+				}
+
+				var rawValueFloat float64
+				switch dataType {
+				case "float32", "float":
+					rawFloat32, err := modbus.ConvertBytesToFloat32(readData, getByteOrder(), getQuantity())
+					if err == nil {
+						rawValueFloat = float64(rawFloat32)
+					}
+				case "float64":
+					rawFloat64, err := modbus.ConvertBytesToFloat64(readData, getByteOrder(), getQuantity())
+					if err == nil {
+						rawValueFloat = rawFloat64
+					}
+				case "int32":
+					rawInt32, err := modbus.ConvertBytesToSignedInt32(readData, getByteOrder(), getQuantity())
+					if err == nil {
+						rawValueFloat = float64(rawInt32)
+					}
+				default:
+					rawValue, err := modbus.ConvertBytesToValue(readData, getByteOrder(), getQuantity())
+					if err == nil {
+						rawValueFloat = float64(rawValue)
+					}
+				}
+
+				// Apply scaling
+				readBackValue = rawValueFloat * getScaling()
+				log.Infof("READ_WRITE read-back successful (attempt %d/%d): parameter=%d, read_back_value=%v", attempt, maxRetries, parameterID, readBackValue)
+				readBackErr = nil
+				break
+			} else {
+				readBackErr = err
+				if attempt < maxRetries {
+					log.Warnf("READ_WRITE read-back failed (attempt %d/%d): parameter=%d, error=%v, retrying in %v...", attempt, maxRetries, parameterID, err, retryDelay)
+					time.Sleep(retryDelay)
+					retryDelay *= 2 // Exponential backoff
+				} else {
+					log.Errorf("READ_WRITE read-back failed after %d attempts: parameter=%d, error=%v", maxRetries, parameterID, err)
+				}
+			}
 		}
 
-		var rawValueFloat float64
-		switch dataType {
-		case "float32", "float":
-			rawFloat32, err := modbus.ConvertBytesToFloat32(readData, getByteOrder(), getQuantity())
-			if err == nil {
-				rawValueFloat = float64(rawFloat32)
+		// If read-back failed after all retries, return error for READ_WRITE parameters
+		if readBackErr != nil {
+			resp := &WriteResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Write successful but read-back verification failed after %d attempts: %v", maxRetries, readBackErr),
 			}
-		case "float64":
-			rawFloat64, err := modbus.ConvertBytesToFloat64(readData, getByteOrder(), getQuantity())
-			if err == nil {
-				rawValueFloat = rawFloat64
+			// Log error to database
+			triggeredBy := "API"
+			if req.WorkflowID != nil {
+				triggeredBy = "WORKFLOW"
 			}
-		case "int32":
-			rawInt32, err := modbus.ConvertBytesToSignedInt32(readData, getByteOrder(), getQuantity())
-			if err == nil {
-				rawValueFloat = float64(rawInt32)
+			writeLog := s.createWriteLog(parameterID, param, device, req, resp, nil, triggeredBy, logValue)
+			if s.writeLogRepo != nil {
+				if err := s.writeLogRepo.Create(writeLog); err != nil {
+					log.Warnf("Failed to write error log: %v", err)
+				}
 			}
-		default:
-			rawValue, err := modbus.ConvertBytesToValue(readData, getByteOrder(), getQuantity())
-			if err == nil {
-				rawValueFloat = float64(rawValue)
-			}
+			return resp, nil
 		}
+	} else {
+		// Other parameters: Optional read-back (best effort)
+		// Use read function code (convert from write function code)
+		readFC := getReadFunctionCode()
+		readData, err := client.Read(ctx, readFC, address, uint16(getQuantity()))
+		if err == nil {
+			// Decode read-back value (similar to worker logic)
+			dataType := getDataType()
+			if dataType == "" {
+				dataType = "uint16"
+			}
 
-		// Apply scaling
-		readBackValue = rawValueFloat * getScaling()
+			var rawValueFloat float64
+			switch dataType {
+			case "float32", "float":
+				rawFloat32, err := modbus.ConvertBytesToFloat32(readData, getByteOrder(), getQuantity())
+				if err == nil {
+					rawValueFloat = float64(rawFloat32)
+				}
+			case "float64":
+				rawFloat64, err := modbus.ConvertBytesToFloat64(readData, getByteOrder(), getQuantity())
+				if err == nil {
+					rawValueFloat = rawFloat64
+				}
+			case "int32":
+				rawInt32, err := modbus.ConvertBytesToSignedInt32(readData, getByteOrder(), getQuantity())
+				if err == nil {
+					rawValueFloat = float64(rawInt32)
+				}
+			default:
+				rawValue, err := modbus.ConvertBytesToValue(readData, getByteOrder(), getQuantity())
+				if err == nil {
+					rawValueFloat = float64(rawValue)
+				}
+			}
+
+			// Apply scaling
+			readBackValue = rawValueFloat * getScaling()
+		}
 	}
 
 	// 12. Update cache RAW (for MANUAL and PRESET modes)

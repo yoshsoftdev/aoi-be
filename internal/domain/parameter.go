@@ -8,7 +8,7 @@ type Parameter struct {
 	Nama          string    `gorm:"not null" json:"nama"`
 	Type          string    `gorm:"not null" json:"type"`                                          // modbus_rtu, modbus_tcp, analog_input, analog_output, snmp, digital_input, digital_output, formula
 	Direction     string    `gorm:"type:varchar(10);default:'READ';index" json:"direction"`        // READ (polling/scheduler) or WRITE (command/on-demand)
-	ReadWrite     bool      `gorm:"default:false" json:"read_write"`                               // Deprecated: use Direction instead
+	ReadWrite     int       `gorm:"default:0" json:"read_write"`                                  // 0=READ, 1=WRITE, 2=READ_WRITE (both polling and writable)
 	ParameterMode string    `gorm:"type:varchar(20);default:'DIRECT';index" json:"parameter_mode"` // SOURCE, DIRECT, CLEAN, FORMULA
 	WriteMode     *string   `gorm:"type:varchar(10);index" json:"write_mode,omitempty"`            // PRESET (value stored) or DYNAMIC (value provided at write time) - only for WRITE parameters
 	PresetValue   *string   `gorm:"type:text" json:"preset_value,omitempty"`                       // JSON-encoded preset value - only for PRESET mode
