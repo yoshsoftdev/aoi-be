@@ -29,6 +29,7 @@ func SetupRoutes(
 	formulaEngine *service.FormulaEngine,
 	alarmRepo repository.AlarmRepository,
 	writeLogRepo repository.WriteLogRepository,
+	bypassEngine *service.BypassEngine,
 ) *gin.Engine {
 	router := gin.Default()
 
@@ -160,6 +161,34 @@ func SetupRoutes(
 		{
 			write.POST("/execute", writeHandler.Execute)
 			write.POST("/test", writeHandler.TestWrite)
+		}
+
+		// Set-Point
+		setPointRepo := repository.NewSetPointRepository()
+		setPointService := service.NewSetPointService(setPointRepo)
+		// Wire bypass engine to set-point service for triggering bypasses on value change
+		setPointService.SetBypassEngine(bypassEngine)
+		setPointHandler := handlers.NewSetPointHandler(setPointService)
+		setPoints := v1.Group("/set-points")
+		{
+			setPoints.GET("", setPointHandler.GetAll)
+			setPoints.GET("/:id", setPointHandler.GetByID)
+			setPoints.POST("", setPointHandler.Create)
+			setPoints.PATCH("/:id", setPointHandler.Update)
+			setPoints.DELETE("/:id", setPointHandler.Delete)
+		}
+
+		// Bypass
+		bypassRepo := repository.NewBypassRepository()
+		bypassService := service.NewBypassService(bypassRepo, setPointRepo, paramRepo)
+		bypassHandler := handlers.NewBypassHandler(bypassService, bypassEngine)
+		bypass := v1.Group("/bypasses")
+		{
+			bypass.GET("", bypassHandler.GetAll)
+			bypass.GET("/:id", bypassHandler.GetByID)
+			bypass.POST("", bypassHandler.Create)
+			bypass.PATCH("/:id", bypassHandler.Update)
+			bypass.DELETE("/:id", bypassHandler.Delete)
 		}
 
 		// Workflow

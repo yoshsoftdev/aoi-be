@@ -171,6 +171,31 @@ func main() {
 		log.Info("Workflow engine initialized and loaded")
 	}
 
+	// Initialize Set-Point Service
+	setPointRepo := repository.NewSetPointRepository()
+	setPointService := service.NewSetPointService(setPointRepo)
+
+	// Initialize Bypass Engine
+	bypassRepo := repository.NewBypassRepository()
+	bypassEngine := service.NewBypassEngine(
+		bypassRepo,
+		setPointRepo,
+		paramRepo,
+		cacheInstance,
+		writeService,
+	)
+
+	// Wire set-point service to bypass engine (for updating set-point values)
+	setPointService.SetBypassEngine(bypassEngine)
+	bypassEngine.SetSetPointService(setPointService)
+
+	// Load all bypasses from database
+	if err := bypassEngine.LoadAll(); err != nil {
+		log.Warnf("Failed to load bypasses: %v", err)
+	} else {
+		log.Info("Bypass engine initialized and loaded")
+	}
+
 	// Set callback: Formula Engine -> Workflow Engine
 	// Workflow Engine evaluates AFTER data READ bersih (after formula evaluation)
 	formulaEngine.SetWorkflowCallback(func(parameterID uint, data *domain.RealtimeData) {
@@ -234,6 +259,7 @@ func main() {
 		formulaEngine,
 		alarmRepo,
 		writeLogRepo,
+		bypassEngine,
 	)
 	log.Info("Routes configured successfully")
 
@@ -291,12 +317,16 @@ func runMigrations() error {
 		&domain.ParameterFormula{},
 		&domain.ParameterFormulaVar{},
 		&domain.ParameterPreset{},
+		&domain.SetPoint{},
 		&domain.Workflow{},
 		&domain.WorkflowCondition{},
 		&domain.WorkflowAction{},
 		&domain.Threshold{},
 		&domain.WorkflowState{},
 		&domain.CurrentAlarm{},
+		&domain.Bypass{},
+		&domain.BypassRule{},
+		&domain.BypassAction{},
 	); err != nil {
 		return err
 	}
