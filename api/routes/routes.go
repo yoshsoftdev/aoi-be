@@ -191,6 +191,18 @@ func SetupRoutes(
 			bypass.DELETE("/:id", bypassHandler.Delete)
 		}
 
+		// IMC Parameter Config
+		imcConfigRepo := repository.NewIMCConfigRepository()
+		imcConfigService := service.NewIMCConfigService(imcConfigRepo)
+		imcConfigHandler := handlers.NewIMCConfigHandler(imcConfigService)
+		imcConfig := v1.Group("/imc-config")
+		{
+			imcConfig.GET("", imcConfigHandler.GetAll)
+			imcConfig.GET("/:cardKey", imcConfigHandler.GetByCardKey)
+			imcConfig.POST("", imcConfigHandler.CreateOrUpdate)
+			imcConfig.DELETE("/:cardKey", imcConfigHandler.Delete)
+		}
+
 		// Workflow
 		workflowHandler := handlers.NewWorkflowHandler(workflowRepo, workflowEngine)
 		workflow := v1.Group("/workflows")

@@ -327,6 +327,7 @@ func runMigrations() error {
 		&domain.Bypass{},
 		&domain.BypassRule{},
 		&domain.BypassAction{},
+		&domain.IMCParameterConfig{},
 	); err != nil {
 		return err
 	}
