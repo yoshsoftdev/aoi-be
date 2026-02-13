@@ -94,41 +94,31 @@ func (e *FormulaEngine) LoadAll() error {
 		return fmt.Errorf("failed to load formulas: %w", err)
 	}
 
-	log := logger.GetLogger()
-	log.Infof("[FORMULA] LoadAll: Found %d formulas in database", len(formulas))
-
 	// Build registry
 	loadedCount := 0
 	skippedCount := 0
 	for _, formula := range formulas {
-		log.Debugf("[FORMULA] Loading formula: formula_id=%d, parameter_id=%d, expression='%s', variables_count=%d",
-			formula.ID, formula.ParameterID, formula.Expression, len(formula.Variables))
-
 		// Get parameter info
 		param, err := e.paramRepo.GetByID(formula.ParameterID)
 		if err != nil {
-			log.Warnf("[FORMULA] Failed to load parameter %d for formula %d: %v", formula.ParameterID, formula.ID, err)
 			skippedCount++
 			continue
 		}
 
 		// Validate: parameter must have is_formula=true
 		if !param.IsFormula {
-			log.Warnf("[FORMULA] Skipping formula %d: parameter %d does not have is_formula=true", formula.ID, formula.ParameterID)
 			skippedCount++
 			continue
 		}
 
 		// Validate: formula must have variables
 		if len(formula.Variables) == 0 {
-			log.Warnf("[FORMULA] Skipping formula %d (parameter_id=%d): no variables defined", formula.ID, formula.ParameterID)
 			skippedCount++
 			continue
 		}
 
 		// Validate: expression must not be empty
 		if strings.TrimSpace(formula.Expression) == "" {
-			log.Warnf("[FORMULA] Skipping formula %d (parameter_id=%d): expression is empty", formula.ID, formula.ParameterID)
 			skippedCount++
 			continue
 		}
@@ -144,7 +134,6 @@ func (e *FormulaEngine) LoadAll() error {
 		// Build variable list
 		vars := make([]FormulaVar, 0, len(formula.Variables))
 		for _, v := range formula.Variables {
-			log.Debugf("[FORMULA]   Variable: name='%s', source_parameter_id=%d", v.VarName, v.SourceParameterID)
 			vars = append(vars, FormulaVar{
 				Name:              v.VarName,
 				SourceParameterID: v.SourceParameterID,
@@ -164,38 +153,6 @@ func (e *FormulaEngine) LoadAll() error {
 		}
 
 		loadedCount++
-		log.Infof("[FORMULA] Loaded formula: parameter_id=%d, parameter_nama='%s', expression='%s', variables=%d",
-			formula.ParameterID, param.Nama, formula.Expression, len(vars))
-	}
-
-	log.Infof("[FORMULA] LoadAll complete: %d loaded, %d skipped (out of %d total)", loadedCount, skippedCount, len(formulas))
-	log.Infof("[FORMULA] Registry contains %d formulas", len(e.formulasByParam))
-
-	// Log all loaded formula parameter IDs
-	if len(e.formulasByParam) > 0 {
-		paramIDs := make([]uint, 0, len(e.formulasByParam))
-		for paramID := range e.formulasByParam {
-			paramIDs = append(paramIDs, paramID)
-		}
-		log.Infof("[FORMULA] Loaded formula parameter IDs: %v", paramIDs)
-	}
-
-	// Check for parameters with is_formula=true but no formula in registry
-	allParams, err := e.paramRepo.GetAll()
-	if err == nil {
-		missingFormulas := make([]uint, 0)
-		for _, param := range allParams {
-			if param.IsFormula {
-				if _, exists := e.formulasByParam[param.ID]; !exists {
-					missingFormulas = append(missingFormulas, param.ID)
-				}
-			}
-		}
-		if len(missingFormulas) > 0 {
-			log.Warnf("[FORMULA] Found %d parameters with is_formula=true but no formula in registry: %v",
-				len(missingFormulas), missingFormulas)
-			log.Warnf("[FORMULA] These parameters will NOT appear in dashboard. Please create parameter_formula entries for them.")
-		}
 	}
 
 	return nil
@@ -211,11 +168,7 @@ func (e *FormulaEngine) EvaluateAll() {
 	}
 	e.mu.RUnlock()
 
-	log := logger.GetLogger()
-	log.Infof("[FORMULA] Evaluating %d formulas after LoadAll", len(formulaParamIDs))
-
 	if len(formulaParamIDs) == 0 {
-		log.Warnf("[FORMULA] No formulas loaded! Check if parameters have is_formula=true and parameter_formula entries")
 		return
 	}
 
@@ -227,13 +180,9 @@ func (e *FormulaEngine) EvaluateAll() {
 		e.mu.RUnlock()
 
 		if def == nil {
-			log.Warnf("[FORMULA] Formula definition not found for parameter %d", paramID)
 			failedCount++
 			continue
 		}
-
-		log.Debugf("[FORMULA] Attempting to evaluate formula parameter %d: expression='%s', variables=%d",
-			paramID, def.Expression, len(def.Variables))
 
 		// Check if dependencies are available
 		// CLEAN derive from SOURCE, FORMULA derive from CLEAN or SOURCE
@@ -251,41 +200,26 @@ func (e *FormulaEngine) EvaluateAll() {
 		}
 
 		if len(missingDeps) > 0 {
-			log.Debugf("[FORMULA] Cannot evaluate formula parameter %d: missing dependencies %v (will retry after polling)",
-				paramID, missingDeps)
 			failedCount++
 			continue
 		}
 
 		if err := e.evaluateFormula(paramID, 0); err != nil {
-			log.Warnf("[FORMULA] Failed to evaluate formula parameter %d: %v", paramID, err)
 			failedCount++
 		} else {
-			log.Infof("[FORMULA] Successfully evaluated formula parameter %d", paramID)
 			successCount++
 		}
-	}
-
-	log.Infof("[FORMULA] Evaluation complete: %d succeeded, %d failed (out of %d total)",
-		successCount, failedCount, len(formulaParamIDs))
-
-	if failedCount > 0 {
-		log.Infof("[FORMULA] Failed formulas will be evaluated automatically when their dependencies are polled")
 	}
 }
 
 // OnRawParameterUpdated is called by workers after a raw parameter is updated in cache
 // This triggers reactive evaluation of all formulas that depend on this parameter
 func (e *FormulaEngine) OnRawParameterUpdated(sourceParamID uint, data *domain.RealtimeData) {
-	log := logger.GetLogger()
-	log.Infof("[FORMULA] OnRawParameterUpdated: source_param_id=%d, value=%v", sourceParamID, data.ProcessedValue)
-
 	e.mu.RLock()
 	dependantFormulaParamIDs := e.dependants[sourceParamID]
 	e.mu.RUnlock()
 
 	if len(dependantFormulaParamIDs) == 0 {
-		log.Debugf("[FORMULA] No formulas depend on parameter %d", sourceParamID)
 		// No formulas depend on this parameter, but workflow might monitor it
 		// Notify workflow engine about raw parameter update
 		if e.workflowCallback != nil {
@@ -294,19 +228,15 @@ func (e *FormulaEngine) OnRawParameterUpdated(sourceParamID uint, data *domain.R
 		return
 	}
 
-	log.Infof("[FORMULA] Found %d formulas depending on parameter %d: %v", len(dependantFormulaParamIDs), sourceParamID, dependantFormulaParamIDs)
 	// Evaluate all dependent formulas
 	successCount := 0
 	for _, formulaParamID := range dependantFormulaParamIDs {
-		log.Debugf("[FORMULA] Evaluating formula parameter %d triggered by source %d", formulaParamID, sourceParamID)
 		if err := e.evaluateFormula(formulaParamID, 0); err != nil {
-			log.Warnf("[FORMULA] Failed to evaluate formula parameter %d: %v", formulaParamID, err)
+			// Silent fail
 		} else {
 			successCount++
-			log.Infof("[FORMULA] Successfully evaluated formula parameter %d (triggered by source %d)", formulaParamID, sourceParamID)
 		}
 	}
-	log.Infof("[FORMULA] Evaluated %d/%d formulas successfully after raw parameter %d update", successCount, len(dependantFormulaParamIDs), sourceParamID)
 }
 
 // IsParameterUsedByFormula checks if a parameter is used as source by any formula
@@ -365,11 +295,6 @@ func (e *FormulaEngine) evaluateFormula(formulaParamID uint, depth int) error {
 		values[v.Name] = f
 	}
 
-	// Log expression and values for debugging
-	logger.GetLogger().Debugf("Formula Engine: Evaluating formula for parameter %d", formulaParamID)
-	logger.GetLogger().Debugf("Formula Engine: Expression: '%s' (length: %d)", def.Expression, len(def.Expression))
-	logger.GetLogger().Debugf("Formula Engine: Variables: %+v", values)
-
 	// Trim whitespace from expression
 	expressionStr := strings.TrimSpace(def.Expression)
 	if expressionStr == "" {
@@ -379,28 +304,21 @@ func (e *FormulaEngine) evaluateFormula(formulaParamID uint, depth int) error {
 	// Evaluate expression using govaluate
 	expression, err := govaluate.NewEvaluableExpression(expressionStr)
 	if err != nil {
-		logger.GetLogger().Errorf("Formula Engine: Failed to parse expression '%s': %v", expressionStr, err)
 		return fmt.Errorf("invalid expression '%s': %w", expressionStr, err)
 	}
 
-	// Log which variables are required by the expression
-	parameters := expression.Vars()
-	logger.GetLogger().Debugf("Formula Engine: Expression requires variables: %v", parameters)
-
 	// Check if all required variables are provided
+	parameters := expression.Vars()
 	for _, param := range parameters {
 		if _, exists := values[param]; !exists {
-			logger.GetLogger().Warnf("Formula Engine: Variable '%s' required by expression but not provided. Available variables: %v", param, values)
+			// Silent warning
 		}
 	}
 
 	result, err := expression.Evaluate(values)
 	if err != nil {
-		logger.GetLogger().Errorf("Formula Engine: Failed to evaluate expression '%s' with values %+v: %v", expressionStr, values, err)
 		return fmt.Errorf("failed to evaluate expression: %w", err)
 	}
-
-	logger.GetLogger().Debugf("Formula Engine: Evaluation result: %v (type: %T)", result, result)
 
 	// Convert result to float64
 	resultFloat, err := toFloat64(result)
@@ -457,20 +375,13 @@ func (e *FormulaEngine) evaluateFormula(formulaParamID uint, depth int) error {
 	// FORMULA results are CLEAN data (no raw value)
 	cleanCacheKey := fmt.Sprintf("parameter:clean:%d", formulaParamID)
 	if err := e.cache.Set(cleanCacheKey, formulaData, 24*time.Hour); err != nil {
-		logger.GetLogger().Warnf("Failed to cache formula clean data: %v", err)
-	} else {
-		logger.GetLogger().Infof("[CLEAN EMIT] parameter_id=%d, parameter_nama=%s, expression=%s, clean_value=%v",
-			formulaParamID, param.Nama, def.Expression, resultFloat)
+		// Silent fail
 	}
 
 	// Broadcast CLEAN DATA via WebSocket
 	// FORMULA parameters are broadcast (they are CLEAN data)
 	if e.wsBroadcaster != nil {
-		logger.GetLogger().Infof("[BROADCAST] Broadcasting FORMULA clean data: parameter_id=%d, parameter_nama=%s, expression=%s, result=%v, device_nama=%s",
-			formulaParamID, param.Nama, def.Expression, resultFloat, deviceNama)
 		e.wsBroadcaster.BroadcastDataUpdate(formulaData)
-	} else {
-		logger.GetLogger().Warnf("[FORMULA] WebSocket broadcaster is nil, cannot broadcast: parameter_id=%d", formulaParamID)
 	}
 
 	// Recursively evaluate formulas that depend on this formula

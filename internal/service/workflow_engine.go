@@ -85,8 +85,6 @@ func (e *WorkflowEngine) LoadAll() error {
 		}
 	}
 
-	log := logger.GetLogger()
-	log.Infof("WorkflowEngine: Loaded %d enabled workflows", len(workflows))
 	return nil
 }
 
@@ -101,13 +99,10 @@ func (e *WorkflowEngine) OnParameterUpdated(parameterID uint, data *domain.Realt
 		return // No workflows monitor this parameter
 	}
 
-	log := logger.GetLogger()
-	log.Debugf("WorkflowEngine: Parameter %d updated, evaluating %d workflows", parameterID, len(workflows))
-
 	// Evaluate each workflow
 	for _, workflow := range workflows {
 		if err := e.evaluateWorkflow(workflow, parameterID, data); err != nil {
-			log.Warnf("WorkflowEngine: Failed to evaluate workflow %d: %v", workflow.ID, err)
+			// Silent fail
 		}
 	}
 }
@@ -115,12 +110,9 @@ func (e *WorkflowEngine) OnParameterUpdated(parameterID uint, data *domain.Realt
 // evaluateWorkflow evaluates a workflow's conditions and executes actions if conditions are met
 // Implements edge trigger: only execute when condition changes from false to true
 func (e *WorkflowEngine) evaluateWorkflow(workflow *domain.Workflow, updatedParamID uint, data *domain.RealtimeData) error {
-	log := logger.GetLogger()
-
 	// Get workflow state for edge trigger
 	state, err := e.workflowRepo.GetStateByWorkflowID(workflow.ID)
 	if err != nil {
-		log.Warnf("WorkflowEngine: Failed to get state for workflow %d: %v", workflow.ID, err)
 		state = nil
 	}
 
@@ -129,7 +121,6 @@ func (e *WorkflowEngine) evaluateWorkflow(workflow *domain.Workflow, updatedPara
 	lastExec, exists := e.debounceMap[workflow.ID]
 	e.mu.RUnlock()
 	if exists && time.Since(lastExec) < e.debounceWindow {
-		log.Debugf("WorkflowEngine: Workflow %d is within debounce window, skipping", workflow.ID)
 		return nil
 	}
 
@@ -147,8 +138,6 @@ func (e *WorkflowEngine) evaluateWorkflow(workflow *domain.Workflow, updatedPara
 
 		if err := e.cache.Get(cleanCacheKey, &paramData); err != nil {
 			// Parameter clean data tidak ditemukan
-			// Workflow hanya boleh monitor parameter yang sudah clean (DIRECT, CLEAN, FORMULA)
-			log.Debugf("WorkflowEngine: Clean data for parameter %d not found in cache (parameter:clean:%d). Workflow only works on clean data (DIRECT, CLEAN, FORMULA).", condition.ParameterID, condition.ParameterID)
 			allConditionsMet = false
 			break
 		}
@@ -165,12 +154,10 @@ func (e *WorkflowEngine) evaluateWorkflow(workflow *domain.Workflow, updatedPara
 			} else if v, ok := paramData.ProcessedValue.(int64); ok {
 				value = float64(v)
 			} else {
-				log.Warnf("WorkflowEngine: Cannot convert ProcessedValue to float64 for parameter %d", condition.ParameterID)
 				allConditionsMet = false
 				break
 			}
 		} else {
-			log.Debugf("WorkflowEngine: ProcessedValue is nil for parameter %d", condition.ParameterID)
 			allConditionsMet = false
 			break
 		}
@@ -195,10 +182,6 @@ func (e *WorkflowEngine) evaluateWorkflow(workflow *domain.Workflow, updatedPara
 		if state == nil || state.LastConditionResult == nil || !*state.LastConditionResult {
 			// Previous state was false or doesn't exist, now it's true -> edge trigger
 			shouldExecute = true
-			log.Infof("WorkflowEngine: Workflow %d condition met (edge trigger)", workflow.ID)
-		} else {
-			// Condition was already true, don't execute again (idempotent)
-			log.Debugf("WorkflowEngine: Workflow %d condition already met, skipping (idempotent)", workflow.ID)
 		}
 	}
 
@@ -218,21 +201,16 @@ func (e *WorkflowEngine) evaluateWorkflow(workflow *domain.Workflow, updatedPara
 	}
 
 	if err := e.workflowRepo.CreateOrUpdateState(newState); err != nil {
-		log.Warnf("WorkflowEngine: Failed to update state for workflow %d: %v", workflow.ID, err)
+		// Silent fail
 	}
 
 	// Handle alarm cleanup: if condition is no longer met, remove alarm from current_alarm
 	if !allConditionsMet {
 		// Condition is no longer met, check if alarm exists and remove it
 		existingAlarm, err := e.alarmRepo.GetByWorkflowID(workflow.ID)
-		if err != nil {
-			log.Warnf("WorkflowEngine: Failed to check alarm for workflow %d: %v", workflow.ID, err)
-		} else if existingAlarm != nil {
+		if err == nil && existingAlarm != nil {
 			// Alarm exists but condition is no longer met, delete it
-			if err := e.alarmRepo.DeleteByWorkflowID(workflow.ID); err != nil {
-				log.Errorf("WorkflowEngine: Failed to delete alarm for workflow %d: %v", workflow.ID, err)
-			} else {
-				log.Infof("WorkflowEngine: Deleted alarm for workflow %d (condition no longer met)", workflow.ID)
+			if err := e.alarmRepo.DeleteByWorkflowID(workflow.ID); err == nil {
 				// Broadcast alarm removal via WebSocket
 				if e.wsBroadcaster != nil {
 					e.wsBroadcaster.BroadcastAlarmRemoved(workflow.ID)
@@ -263,21 +241,11 @@ func (e *WorkflowEngine) evaluateWorkflow(workflow *domain.Workflow, updatedPara
 		}
 
 		// Execute actions sequentially (one after another, waiting for each to complete)
-		log.Infof("WorkflowEngine: Executing %d actions sequentially for workflow %d", len(sortedActions), workflow.ID)
-		for idx, action := range sortedActions {
-			log.Infof("WorkflowEngine: Executing action %d/%d (order=%d, type=%s) for workflow %d",
-				idx+1, len(sortedActions), action.ActionOrder, action.ActionType, workflow.ID)
-
+		for _, action := range sortedActions {
 			if err := e.executeAction(workflow.ID, workflow, action); err != nil {
-				log.Errorf("WorkflowEngine: Failed to execute action %d (order=%d) for workflow %d: %v",
-					action.ID, action.ActionOrder, workflow.ID, err)
 				// Continue with next action even if current one fails
-			} else {
-				log.Infof("WorkflowEngine: Action %d/%d (order=%d, type=%s) completed successfully for workflow %d",
-					idx+1, len(sortedActions), action.ActionOrder, action.ActionType, workflow.ID)
 			}
 		}
-		log.Infof("WorkflowEngine: All actions completed for workflow %d", workflow.ID)
 	}
 
 	return nil
@@ -299,15 +267,12 @@ func (e *WorkflowEngine) evaluateCondition(value float64, operator string, thres
 	case "!=", "<>":
 		return value != threshold
 	default:
-		logger.GetLogger().Warnf("WorkflowEngine: Unknown operator: %s", operator)
 		return false
 	}
 }
 
 // executeAction executes a workflow action
 func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflow, action domain.WorkflowAction) error {
-	log := logger.GetLogger()
-
 	switch action.ActionType {
 	case "TRIGGER_WRITE":
 		// TRIGGER_WRITE: trigger PRESET parameter (no value sent)
@@ -341,8 +306,6 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 		}
 
 		// Execute trigger via WriteService (TRIGGER mode uses preset_value from parameter)
-		log.Infof("WorkflowEngine: Executing TRIGGER_WRITE action: workflow=%d, parameter=%d (PRESET)", workflowID, *action.ParameterID)
-
 		ctx := context.Background()
 		workflowNama := workflow.Nama
 		writeReq := WriteRequest{
@@ -359,8 +322,6 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 		if !result.Success {
 			return fmt.Errorf("write failed: %s", result.Error)
 		}
-
-		log.Infof("WorkflowEngine: TRIGGER_WRITE action successful: workflow=%d, parameter=%d", workflowID, *action.ParameterID)
 
 	case "WRITE_WITH_VALUE":
 		// WRITE_WITH_VALUE: write DYNAMIC parameter or READ_WRITE parameter (value required)
@@ -391,12 +352,6 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 		}
 
 		// Execute write via WriteService
-		paramType := "DYNAMIC"
-		if param.Direction == "READ_WRITE" {
-			paramType = "READ_WRITE (treated as DYNAMIC)"
-		}
-		log.Infof("WorkflowEngine: Executing WRITE_WITH_VALUE action: workflow=%d, parameter=%d, value=%f (%s)", workflowID, *action.ParameterID, *action.Value, paramType)
-
 		ctx := context.Background()
 		workflowNama := workflow.Nama
 		writeReq := WriteRequest{
@@ -419,20 +374,8 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 			return fmt.Errorf("write failed: %s", result.Error)
 		}
 
-		// For READ_WRITE parameters, log read-back success
-		if param.Direction == "READ_WRITE" || param.ReadWrite == 2 {
-			if result.ReadBackValue != nil {
-				log.Infof("WorkflowEngine: WRITE_WITH_VALUE action successful with read-back verification: workflow=%d, parameter=%d, read_back_value=%v", workflowID, *action.ParameterID, result.ReadBackValue)
-			} else {
-				log.Warnf("WorkflowEngine: WRITE_WITH_VALUE action successful but no read-back value: workflow=%d, parameter=%d", workflowID, *action.ParameterID)
-			}
-		} else {
-			log.Infof("WorkflowEngine: WRITE_WITH_VALUE action successful: workflow=%d, parameter=%d", workflowID, *action.ParameterID)
-		}
-
 	case "write":
 		// Legacy support: treat as WRITE_WITH_VALUE
-		log.Warnf("WorkflowEngine: Legacy 'write' action type detected, treating as WRITE_WITH_VALUE")
 		if action.ParameterID == nil {
 			return fmt.Errorf("parameter_id is required for write action")
 		}
@@ -474,30 +417,17 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 			return fmt.Errorf("write failed: %s", result.Error)
 		}
 
-		// For READ_WRITE parameters, log read-back success
-		if param.Direction == "READ_WRITE" || param.ReadWrite == 2 {
-			if result.ReadBackValue != nil {
-				log.Infof("WorkflowEngine: Write action successful with read-back verification: workflow=%d, parameter=%d, read_back_value=%v", workflowID, *action.ParameterID, result.ReadBackValue)
-			} else {
-				log.Warnf("WorkflowEngine: Write action successful but no read-back value: workflow=%d, parameter=%d", workflowID, *action.ParameterID)
-			}
-		} else {
-			log.Infof("WorkflowEngine: Write action successful: workflow=%d, parameter=%d", workflowID, *action.ParameterID)
-		}
-
 	case "event":
 		// TODO: Implement event bus
 		if action.EventName == nil {
 			return fmt.Errorf("event_name is required for event action")
 		}
-		log.Infof("WorkflowEngine: Emitting event: workflow=%d, event=%s", workflowID, *action.EventName)
 		// e.eventBus.Publish(*action.EventName, workflowID)
 
 	case "delay":
 		if action.DelayMs == nil {
 			return fmt.Errorf("delay_ms is required for delay action")
 		}
-		log.Infof("WorkflowEngine: Delay action: workflow=%d, delay=%dms", workflowID, *action.DelayMs)
 		time.Sleep(time.Duration(*action.DelayMs) * time.Millisecond)
 
 	case "alarm":
@@ -533,17 +463,12 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 		}
 
 		if err := e.alarmRepo.CreateOrUpdate(alarm); err != nil {
-			log.Errorf("WorkflowEngine: Failed to save alarm to current_alarm table: %v", err)
 			return fmt.Errorf("failed to save alarm: %w", err)
 		}
-
-		log.Infof("WorkflowEngine: Alarm saved to current_alarm: workflow=%d (%s), message=%s", workflowID, workflowName, *action.AlarmMessage)
 
 		// Broadcast alarm notification via WebSocket
 		if e.wsBroadcaster != nil {
 			e.wsBroadcaster.BroadcastAlarm(workflowID, workflowName, *action.AlarmMessage)
-		} else {
-			log.Warnf("WorkflowEngine: WebSocket broadcaster not available, alarm notification not sent")
 		}
 
 		// Send alarm to external HTTP endpoint

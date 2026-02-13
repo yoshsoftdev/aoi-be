@@ -2,7 +2,6 @@ package service
 
 import (
 	"aoi-backend/internal/core/cache"
-	"aoi-backend/internal/core/logger"
 	"aoi-backend/internal/domain"
 	"aoi-backend/internal/repository"
 	"context"
@@ -59,7 +58,6 @@ func (e *BypassEngine) LoadAll() error {
 		return fmt.Errorf("failed to load bypass list: %w", err)
 	}
 	e.bypasses = list
-	logger.GetLogger().Infof("BypassEngine: loaded %d bypass definitions", len(list))
 	return nil
 }
 
@@ -69,8 +67,6 @@ func (e *BypassEngine) OnSetPointChanged(ctx context.Context, setPointID uint) e
 	e.mu.RLock()
 	bypasses := e.bypasses
 	e.mu.RUnlock()
-
-	log := logger.GetLogger()
 
 	for i := range bypasses {
 		b := &bypasses[i]
@@ -96,12 +92,11 @@ func (e *BypassEngine) OnSetPointChanged(ctx context.Context, setPointID uint) e
 
 		ok, err := e.evaluateBypass(ctx, b)
 		if err != nil {
-			log.Warnf("BypassEngine: failed to evaluate bypass %d: %v", b.ID, err)
 			continue
 		}
 		if ok {
 			if err := e.executeActions(ctx, b); err != nil {
-				log.Warnf("BypassEngine: failed to execute actions for bypass %d: %v", b.ID, err)
+				// Silent fail
 			}
 		}
 	}
@@ -111,8 +106,6 @@ func (e *BypassEngine) OnSetPointChanged(ctx context.Context, setPointID uint) e
 
 // evaluateBypass mengembalikan true jika semua rule terpenuhi.
 func (e *BypassEngine) evaluateBypass(ctx context.Context, b *domain.Bypass) (bool, error) {
-	log := logger.GetLogger()
-
 	if len(b.Rules) == 0 {
 		// Tidak ada rule -> dianggap selalu true (tapi desain kita biasanya selalu ada rule)
 		return true, nil
@@ -127,7 +120,6 @@ func (e *BypassEngine) evaluateBypass(ctx context.Context, b *domain.Bypass) (bo
 		// Ambil nilai kiri
 		leftValue, err := e.getSourceValue(ctx, r.LeftSourceType, r.LeftSourceID)
 		if err != nil {
-			log.Debugf("BypassEngine: failed to get left value for rule %d: %v", r.ID, err)
 			return false, err
 		}
 
@@ -144,7 +136,6 @@ func (e *BypassEngine) evaluateBypass(ctx context.Context, b *domain.Bypass) (bo
 			}
 			rightValue, err = e.getSourceValue(ctx, "set_point", *r.RightSourceID)
 			if err != nil {
-				log.Debugf("BypassEngine: failed to get right set-point value for rule %d: %v", r.ID, err)
 				return false, err
 			}
 		} else {
@@ -198,8 +189,6 @@ func (e *BypassEngine) getSourceValue(ctx context.Context, sourceType string, so
 
 // executeActions mengeksekusi semua aksi bypass secara sequential berdasarkan action_order.
 func (e *BypassEngine) executeActions(ctx context.Context, b *domain.Bypass) error {
-	log := logger.GetLogger()
-
 	for _, a := range b.Actions {
 		// Tentukan nilai yang akan di-write
 		var valueToWrite *float64
@@ -235,8 +224,6 @@ func (e *BypassEngine) executeActions(ctx context.Context, b *domain.Bypass) err
 			if err := e.setPointService.UpdateValue(ctx, *a.WriteSetPointID, *valueToWrite); err != nil {
 				return fmt.Errorf("failed to update set-point %d for bypass_action %d: %w", *a.WriteSetPointID, a.ID, err)
 			}
-
-			log.Infof("BypassEngine: executed action %d for bypass %d (set_point_id=%d, value=%f)", a.ID, b.ID, *a.WriteSetPointID, *valueToWrite)
 		} else if a.WriteParameterID != 0 {
 			// Write to parameter
 			param, err := e.paramRepo.GetByID(a.WriteParameterID)
@@ -266,8 +253,6 @@ func (e *BypassEngine) executeActions(ctx context.Context, b *domain.Bypass) err
 			if !result.Success {
 				return fmt.Errorf("write failed for bypass_action %d: %s", a.ID, result.Error)
 			}
-
-			log.Infof("BypassEngine: executed action %d for bypass %d (parameter_id=%d)", a.ID, b.ID, a.WriteParameterID)
 		} else {
 			return fmt.Errorf("bypass_action %d: either write_parameter_id or write_set_point_id must be set", a.ID)
 		}

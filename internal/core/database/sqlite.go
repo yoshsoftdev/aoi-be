@@ -27,15 +27,8 @@ func Init() error {
 	// Enable WAL mode for better concurrency and foreign key constraints
 	dsn := fmt.Sprintf("%s?_journal_mode=WAL&_foreign_keys=1", dbPath)
 	
-	var logLevel logger.LogLevel
-	if cfg.App.Env == "development" {
-		logLevel = logger.Info
-	} else {
-		logLevel = logger.Error
-	}
-
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logLevel),
+		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)

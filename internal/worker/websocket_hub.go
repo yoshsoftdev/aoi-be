@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"aoi-backend/internal/core/logger"
 	"aoi-backend/internal/domain"
 
 	"github.com/gorilla/websocket"
@@ -117,11 +116,8 @@ func (h *WebSocketHub) Unregister(conn *websocket.Conn) {
 //   - Workers (for DIRECT parameters after scaling)
 //   - Formula Engine (for CLEAN and FORMULA parameters)
 func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
-	log := logger.GetLogger()
-
 	// GUARD: Ensure RawValue is nil (CLEAN data should not expose raw values)
 	if data.RawValue != nil {
-		log.Warnf("[BROADCAST] ⚠️  WARNING: Attempting to broadcast data with RawValue set (parameter_id=%d). RawValue will be removed.", data.ParameterID)
 		data.RawValue = nil // Force remove raw value
 	}
 
@@ -138,22 +134,18 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 
 	// Convert string to numeric if somehow ProcessedValue is still string
 	if strVal, ok := value.(string); ok {
-		log.Warnf("[BROADCAST] ProcessedValue is string '%s' for parameter_id=%d, attempting to convert to numeric", strVal, data.ParameterID)
 		// Try to parse as number
 		if parsedNum, err := strconv.ParseFloat(strVal, 64); err == nil {
 			value = parsedNum
-			log.Infof("[BROADCAST] Converted string '%s' to numeric %.2f for parameter_id=%d", strVal, parsedNum, data.ParameterID)
 		} else {
 			// Cannot parse, default to 0
 			value = float64(0)
-			log.Warnf("[BROADCAST] Cannot parse string '%s' to numeric for parameter_id=%d, defaulting to 0", strVal, data.ParameterID)
 		}
 	}
 
 	if value == nil && data.Status != "offline" {
 		// Only default to 0 if status is not offline
 		value = float64(0)
-		log.Warnf("[BROADCAST] ProcessedValue is nil for parameter_id=%d (status=%s), defaulting to 0", data.ParameterID, data.Status)
 	}
 	// If status is offline and value is nil, keep it as nil (null in JSON)
 
@@ -161,21 +153,18 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 	status := data.Status
 	if status == "" {
 		status = "offline"
-		log.Warnf("[BROADCAST] Status is empty for parameter_id=%d, defaulting to 'offline'", data.ParameterID)
 	}
 
 	// CRITICAL: Ensure alarmstatus is never empty - default to "normal" if empty
 	alarmStatus := data.AlarmStatus
 	if alarmStatus == "" {
 		alarmStatus = domain.AlarmStatusNormal
-		log.Warnf("[BROADCAST] AlarmStatus is empty for parameter_id=%d, defaulting to 'normal'", data.ParameterID)
 	}
 
 	// CRITICAL: Final validation - value must be numeric (never string)
 	// Double check to ensure no string slips through
 	var finalValue interface{} = value
-	if strVal, ok := value.(string); ok {
-		log.Errorf("[BROADCAST] CRITICAL: Value is still string '%s' for parameter_id=%d after conversion attempt, forcing to 0", strVal, data.ParameterID)
+	if _, ok := value.(string); ok {
 		finalValue = float64(0)
 	} else {
 		finalValue = value
@@ -189,11 +178,9 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 		case float64:
 			// Round to 2 decimal places
 			roundedValue = math.Round(v*100) / 100
-			log.Debugf("[BROADCAST] Parameter %d: Rounded value from %.10f to %.2f", data.ParameterID, v, roundedValue)
 		case float32:
 			// Round to 2 decimal places
 			roundedValue = float32(math.Round(float64(v)*100) / 100)
-			log.Debugf("[BROADCAST] Parameter %d: Rounded value from %.10f to %.2f", data.ParameterID, v, roundedValue)
 		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
 			// Integer values don't need rounding, keep as is
 			roundedValue = finalValue
@@ -201,7 +188,6 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 			// For other types, try to convert to float64 and round
 			if numVal, ok := convertToFloat64(finalValue); ok {
 				roundedValue = math.Round(numVal*100) / 100
-				log.Debugf("[BROADCAST] Parameter %d: Converted and rounded value from %v to %.2f", data.ParameterID, finalValue, roundedValue)
 			} else {
 				// Cannot convert, keep original
 				roundedValue = finalValue
@@ -211,9 +197,6 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 		// Keep nil for offline status
 		roundedValue = finalValue
 	}
-
-	// Log final value type for debugging
-	log.Debugf("[BROADCAST] Parameter %d: Final value type=%T, value=%v (rounded)", data.ParameterID, roundedValue, roundedValue)
 
 	dashboardData := map[string]interface{}{
 		"parameter_id":   data.ParameterID,
@@ -239,7 +222,6 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 
 	bytes, err := json.Marshal(message)
 	if err != nil {
-		log.Errorf("[BROADCAST] Failed to marshal broadcast message: %v", err)
 		return
 	}
 
@@ -250,7 +232,6 @@ func (h *WebSocketHub) BroadcastDataUpdate(data domain.RealtimeData) {
 		// Successfully queued for batch processing
 	default:
 		// Batch channel full, fallback to immediate broadcast
-		log.Warnf("[BROADCAST] Batch channel full, sending immediate broadcast for parameter_id=%d", data.ParameterID)
 		h.broadcast <- bytes
 	}
 }
@@ -346,7 +327,6 @@ func (h *WebSocketHub) flushBatch() {
 
 	bytes, err := json.Marshal(message)
 	if err != nil {
-		logger.GetLogger().Errorf("[BROADCAST] Failed to marshal batch message: %v", err)
 		return
 	}
 
@@ -358,8 +338,6 @@ func (h *WebSocketHub) flushBatch() {
 // prepareDashboardData converts RealtimeData to dashboard format
 // Returns nil if data should be skipped
 func (h *WebSocketHub) prepareDashboardData(data domain.RealtimeData) map[string]interface{} {
-	log := logger.GetLogger()
-
 	// GUARD: Ensure RawValue is nil
 	if data.RawValue != nil {
 		data.RawValue = nil
@@ -394,8 +372,7 @@ func (h *WebSocketHub) prepareDashboardData(data domain.RealtimeData) map[string
 
 	// Final validation - value must be numeric
 	var finalValue interface{} = value
-	if strVal, ok := value.(string); ok {
-		log.Errorf("[BROADCAST] CRITICAL: Value is still string '%s' for parameter_id=%d, forcing to 0", strVal, data.ParameterID)
+	if _, ok := value.(string); ok {
 		finalValue = float64(0)
 	} else {
 		finalValue = value
@@ -466,7 +443,6 @@ func (h *WebSocketHub) sendToClientsParallel(clients []*websocket.Conn, message 
 				h.mu.Unlock()
 				c.Close()
 				atomic.AddInt32(&failedCount, 1)
-				logger.GetLogger().Debugf("[BROADCAST] Failed to send to client, removed: %v", err)
 			} else {
 				atomic.AddInt32(&sentCount, 1)
 			}
@@ -524,8 +500,6 @@ func (h *WebSocketHub) BroadcastStatusUpdate(paramID uint, status string) {
 
 // BroadcastAlarm broadcasts an alarm notification to all connected WebSocket clients
 func (h *WebSocketHub) BroadcastAlarm(workflowID uint, workflowName string, message string) {
-	log := logger.GetLogger()
-	log.Infof("[BROADCAST] Broadcasting alarm: workflow_id=%d, workflow_name=%s, message=%s", workflowID, workflowName, message)
 
 	alarmData := map[string]interface{}{
 		"workflow_id":   workflowID,
@@ -541,18 +515,14 @@ func (h *WebSocketHub) BroadcastAlarm(workflowID uint, workflowName string, mess
 
 	bytes, err := json.Marshal(wsMessage)
 	if err != nil {
-		log.Errorf("[BROADCAST] Failed to marshal alarm message: %v", err)
 		return
 	}
 
-	log.Debugf("[BROADCAST] Queuing alarm message: %d bytes, workflow_id=%d", len(bytes), workflowID)
 	h.broadcast <- bytes
 }
 
 // BroadcastAlarmRemoved broadcasts alarm removal notification to all connected WebSocket clients
 func (h *WebSocketHub) BroadcastAlarmRemoved(workflowID uint) {
-	log := logger.GetLogger()
-	log.Infof("[BROADCAST] Broadcasting alarm removal: workflow_id=%d", workflowID)
 
 	alarmRemovedData := map[string]interface{}{
 		"workflow_id": workflowID,
@@ -566,11 +536,9 @@ func (h *WebSocketHub) BroadcastAlarmRemoved(workflowID uint) {
 
 	bytes, err := json.Marshal(wsMessage)
 	if err != nil {
-		log.Errorf("[BROADCAST] Failed to marshal alarm removal message: %v", err)
 		return
 	}
 
-	log.Debugf("[BROADCAST] Queuing alarm removal message: %d bytes, workflow_id=%d", len(bytes), workflowID)
 	h.broadcast <- bytes
 }
 

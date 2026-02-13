@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"aoi-backend/internal/core/cache"
-	"aoi-backend/internal/core/logger"
 	"aoi-backend/internal/domain"
 	"aoi-backend/internal/repository"
 	"aoi-backend/internal/service"
@@ -68,7 +67,6 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 	// Panic recovery to prevent crash on concurrent SNMP requests
 	defer func() {
 		if r := recover(); r != nil {
-			logger.GetLogger().Errorf("[SNMP] PANIC RECOVERED in Execute: config_id=%d, panic=%v", configID, r)
 			err = fmt.Errorf("panic recovered: %v", r)
 		}
 	}()
@@ -78,12 +76,6 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 		return fmt.Errorf("failed to get SNMP config: %w", err)
 	}
 
-	// Debug: Log string mapping config if exists
-	if config.StringMapping != nil && *config.StringMapping != "" {
-		logger.GetLogger().Debugf("[SNMP] Parameter %d: Loaded string mapping from DB: %s", config.IDParameter, *config.StringMapping)
-	} else {
-		logger.GetLogger().Debugf("[SNMP] Parameter %d: No string mapping configured", config.IDParameter)
-	}
 
 	param, err := w.paramRepo.GetByID(config.IDParameter)
 	if err != nil {
@@ -95,8 +87,6 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				logger.GetLogger().Errorf("[SNMP] PANIC in NewSNMPClient: config_id=%d, parameter_id=%d, panic=%v",
-					configID, config.IDParameter, r)
 				err = fmt.Errorf("panic in NewSNMPClient: %v", r)
 			}
 		}()
@@ -120,7 +110,7 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 		if client != nil {
 			defer func() {
 				if r := recover(); r != nil {
-					logger.GetLogger().Errorf("[SNMP] PANIC in client.Close: config_id=%d, panic=%v", configID, r)
+					// Silent panic recovery
 				}
 			}()
 			client.Close()
@@ -132,8 +122,6 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				logger.GetLogger().Errorf("[SNMP] PANIC in client.Get: config_id=%d, parameter_id=%d, oid=%s, panic=%v",
-					configID, config.IDParameter, config.OID, r)
 				err = fmt.Errorf("panic in client.Get: %v", r)
 			}
 		}()
@@ -159,13 +147,8 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 
 	// Check if raw value is string
 	if strValue, ok := rawValue.(string); ok {
-		logger.GetLogger().Debugf("[SNMP] Parameter %d: received string value '%s' (type: string, len: %d)", config.IDParameter, strValue, len(strValue))
-
 		// CRITICAL: Trim whitespace first (SNMP sometimes returns values with trailing spaces)
 		trimmedValue := strings.TrimSpace(strValue)
-		if trimmedValue != strValue {
-			logger.GetLogger().Debugf("[SNMP] Parameter %d: trimmed string from '%s' to '%s'", config.IDParameter, strValue, trimmedValue)
-		}
 
 		// Try to parse as number first (SNMP sometimes returns numeric as string like "231.30", "0.00", "15", "-5.5")
 		// Priority: Try float64 first (handles both int and float), then int64 as fallback
@@ -177,36 +160,26 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 				// It's a whole number, use int64 for cleaner representation
 				processedRawValue = int64(parsedFloat)
 				rawFloat = parsedFloat
-				logger.GetLogger().Infof("[SNMP] Parameter %d: parsed string '%s' as integer %d (numeric, no mapping needed)", config.IDParameter, strValue, int64(parsedFloat))
 			} else {
 				// It has decimal places, use float64
 				processedRawValue = parsedFloat
 				rawFloat = parsedFloat
-				logger.GetLogger().Infof("[SNMP] Parameter %d: parsed string '%s' as float %.2f (numeric, no mapping needed)", config.IDParameter, strValue, parsedFloat)
 			}
 		} else {
 			// String is not numeric (e.g., "up", "down", "hello world") - must have mapping
-			logger.GetLogger().Debugf("[SNMP STRING] Parameter %d: string '%s' is NOT numeric (parse error: %v), checking for mapping...", config.IDParameter, strValue, errFloat)
-
 			if config.StringMapping == nil || *config.StringMapping == "" {
 				err := fmt.Errorf("SNMP string value '%s' requires string mapping configuration", strValue)
-				logger.GetLogger().Errorf("[SNMP STRING] Parameter %d: %v", config.IDParameter, err)
 				w.handleError(config.IDParameter, param.Nama, param.Type, err)
 				return err
 			}
-
-			logger.GetLogger().Debugf("[SNMP STRING] Parameter %d: found string mapping config: %s", config.IDParameter, *config.StringMapping)
 
 			// Parse string mapping JSON (e.g., {"hello world": 1, "up": 1, "down": 0})
 			var stringMap map[string]float64
 			if err := json.Unmarshal([]byte(*config.StringMapping), &stringMap); err != nil {
 				err := fmt.Errorf("invalid string mapping JSON: %w", err)
-				logger.GetLogger().Errorf("[SNMP STRING] Parameter %d: %v", config.IDParameter, err)
 				w.handleError(config.IDParameter, param.Nama, param.Type, err)
 				return err
 			}
-
-			logger.GetLogger().Debugf("[SNMP STRING] Parameter %d: parsed mapping: %v", config.IDParameter, stringMap)
 
 			// Map string to numeric using saved mapping
 			// CRITICAL: Use trimmedValue for mapping comparison (consistent with numeric parsing)
@@ -219,8 +192,6 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 
 			if !found {
 				err := fmt.Errorf("string value '%s' (trimmed: '%s') not found in mapping. Available: %v", strValue, trimmedValue, stringMap)
-				logger.GetLogger().Errorf("[SNMP STRING] Parameter %d: %v", config.IDParameter, err)
-				logger.GetLogger().Errorf("[SNMP STRING] Parameter %d: Received string '%s' does not match any mapping key. Mapping keys: %v", config.IDParameter, strValue, getMapKeys(stringMap))
 				w.handleError(config.IDParameter, param.Nama, param.Type, err)
 				return err
 			}
@@ -229,7 +200,6 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 			// CRITICAL: Ensure this is always numeric (float64), never string
 			processedRawValue = mappedValue
 			rawFloat = mappedValue
-			logger.GetLogger().Infof("[SNMP STRING] Parameter %d: mapped '%s' → %.0f (using saved mapping from DB)", config.IDParameter, strValue, mappedValue)
 		}
 	} else {
 		// Numeric value - convert to float64 for formula evaluation
@@ -263,9 +233,7 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 	var processedValue interface{} = processedRawValue
 	if param.CustomRumus != nil && *param.CustomRumus != "" {
 		processed, err := w.formulaEval.Evaluate(*param.CustomRumus, rawFloat)
-		if err != nil {
-			logger.GetLogger().Warnf("Failed to evaluate formula for parameter %d: %v", config.IDParameter, err)
-		} else {
+		if err == nil {
 			processedValue = processed
 		}
 	}
@@ -273,7 +241,6 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 	// CRITICAL: Ensure processedValue is always numeric (never string)
 	// Convert to float64 if it's still a string (should not happen, but safety check)
 	if strVal, ok := processedValue.(string); ok {
-		logger.GetLogger().Warnf("[SNMP] Parameter %d: processedValue is still string '%s', attempting to parse or use mapping", config.IDParameter, strVal)
 		// Try to parse as number
 		if parsedNum, err := strconv.ParseFloat(strVal, 64); err == nil && !isNaNOrInf(parsedNum) {
 			processedValue = parsedNum
@@ -285,13 +252,11 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 				if mappedValue, found := stringMap[strVal]; found {
 					processedValue = mappedValue
 					rawFloat = mappedValue
-					logger.GetLogger().Infof("[SNMP] Parameter %d: fallback mapped '%s' → %.0f", config.IDParameter, strVal, mappedValue)
 				}
 			}
 		}
 		// If still string after all attempts, default to 0
 		if _, stillString := processedValue.(string); stillString {
-			logger.GetLogger().Errorf("[SNMP] Parameter %d: processedValue is still string '%s' after all attempts, defaulting to 0", config.IDParameter, strVal)
 			processedValue = float64(0)
 			rawFloat = 0
 		}
@@ -322,7 +287,6 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 	// GUARD: Only process SOURCE & DIRECT parameters here
 	// CLEAN & FORMULA are handled by Formula Engine, not workers
 	if paramMode != domain.ParameterModeSOURCE && paramMode != domain.ParameterModeDIRECT {
-		logger.GetLogger().Debugf("Skipping non-pollable parameter %d (Mode=%s) - handled by Formula Engine", config.IDParameter, paramMode)
 		return nil
 	}
 
@@ -346,10 +310,7 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 	// ============================================
 	rawCacheKey := fmt.Sprintf("parameter:raw:%d", config.IDParameter)
 	if err := w.cache.Set(rawCacheKey, realtimeData, 24*time.Hour); err != nil {
-		logger.GetLogger().Warnf("Failed to save raw data to cache: %v", err)
-	} else {
-		logger.GetLogger().Infof("[RAW READ] parameter_id=%d, parameter_nama=%s, mode=%s, raw_value=%v, processed_value=%v",
-			config.IDParameter, param.Nama, paramMode, realtimeData.RawValue, realtimeData.ProcessedValue)
+		// Silent fail
 	}
 
 	// ============================================
@@ -358,17 +319,9 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 	if paramMode == domain.ParameterModeSOURCE {
 		// SOURCE: Internal only, tidak dibroadcast
 		// Only notify Formula Engine (for CLEAN derivation)
-		logger.GetLogger().Infof("[SOURCE] Parameter %d (%s): RAW cached, mode=SOURCE, processed_value=%v",
-			config.IDParameter, param.Nama, realtimeData.ProcessedValue)
-
 		if w.formulaEngine != nil {
-			logger.GetLogger().Infof("[SOURCE] Notifying Formula Engine: parameter_id=%d, value=%v", config.IDParameter, realtimeData.ProcessedValue)
 			w.formulaEngine.OnRawParameterUpdated(config.IDParameter, &realtimeData)
-		} else {
-			logger.GetLogger().Warnf("[SOURCE] Formula Engine is nil, cannot notify for parameter_id=%d", config.IDParameter)
 		}
-
-		logger.GetLogger().Infof("[SOURCE] Parameter %d: RAW cached, NOT broadcast (internal only, used by formula)", config.IDParameter)
 		return nil
 	}
 
@@ -377,14 +330,11 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 		// CRITICAL: Ensure ProcessedValue is always numeric (never string) before broadcast
 		finalProcessedValue := processedValue
 		if strVal, ok := processedValue.(string); ok {
-			logger.GetLogger().Warnf("[SNMP DIRECT] Parameter %d: ProcessedValue is still string '%s', converting to numeric", config.IDParameter, strVal)
 			// This should not happen if mapping is correct, but safety check
 			if parsedNum, err := strconv.ParseFloat(strVal, 64); err == nil && !isNaNOrInf(parsedNum) {
 				finalProcessedValue = parsedNum
-				logger.GetLogger().Infof("[SNMP DIRECT] Parameter %d: converted string '%s' to numeric %.2f", config.IDParameter, strVal, parsedNum)
 			} else {
 				finalProcessedValue = float64(0)
-				logger.GetLogger().Errorf("[SNMP DIRECT] Parameter %d: Cannot convert string '%s' to numeric, defaulting to 0", config.IDParameter, strVal)
 			}
 		}
 
@@ -414,7 +364,6 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 					if numericValue == 0 {
 						// Force abnormal for value 0 (from string mapping)
 						cleanData.AlarmStatus = domain.AlarmStatusAbnormal
-						logger.GetLogger().Infof("[SNMP STRING] Parameter %d: value=0 (from string mapping) → force abnormal", config.IDParameter)
 					} else if numericValue == 1 {
 						// Value 1: continue with normal threshold evaluation
 						w.thresholdService.ApplyThreshold(&cleanData)
@@ -435,21 +384,16 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 		// Save CLEAN data to public cache (with alarmstatus)
 		cleanCacheKey := fmt.Sprintf("parameter:clean:%d", config.IDParameter)
 		if err := w.cache.Set(cleanCacheKey, cleanData, 24*time.Hour); err != nil {
-			logger.GetLogger().Warnf("Failed to save clean data to cache: %v", err)
-		} else {
-			logger.GetLogger().Infof("[CLEAN EMIT] parameter_id=%d, parameter_nama=%s, clean_value=%v, alarmstatus=%s",
-				config.IDParameter, param.Nama, cleanData.ProcessedValue, cleanData.AlarmStatus)
+			// Silent fail
 		}
 
 		// Broadcast CLEAN data via WebSocket (with alarmstatus)
 		if w.wsHub != nil {
-			logger.GetLogger().Debugf("[BROADCAST] Broadcasting DIRECT parameter clean data: parameter_id=%d", config.IDParameter)
 			w.wsHub.BroadcastDataUpdate(cleanData)
 		}
 
 		// Also notify Formula Engine (for CLEAN derivation if needed)
 		if w.formulaEngine != nil {
-			logger.GetLogger().Debugf("[DIRECT] Notifying Formula Engine: parameter_id=%d", config.IDParameter)
 			w.formulaEngine.OnRawParameterUpdated(config.IDParameter, &realtimeData)
 		}
 
@@ -461,7 +405,6 @@ func (w *SNMPWorker) Execute(ctx context.Context, configID uint) (err error) {
 
 func (w *SNMPWorker) handleError(paramID uint, paramNama, paramType string, err error) {
 	errorMsg := err.Error()
-	log := logger.GetLogger()
 
 	// Get parameter and device for error message
 	param, paramErr := w.paramRepo.GetByID(paramID)
@@ -479,13 +422,11 @@ func (w *SNMPWorker) handleError(paramID uint, paramNama, paramType string, err 
 
 		// GUARD: Skip error handling for formula parameters (handled by Formula Engine)
 		if param.IsFormula {
-			log.Debugf("Skipping error broadcast for formula parameter %d", paramID)
 			return
 		}
 
 		// GUARD: Skip error handling for SOURCE parameters (internal only)
 		if paramMode == domain.ParameterModeSOURCE {
-			log.Debugf("Skipping error broadcast for SOURCE parameter %d", paramID)
 			return
 		}
 	} else {
@@ -526,23 +467,19 @@ func (w *SNMPWorker) handleError(paramID uint, paramNama, paramType string, err 
 		Error:         &errorMsg,
 	}
 	if err := w.cache.Set(rawCacheKey, rawErrorData, 24*time.Hour); err != nil {
-		log.Warnf("Failed to save raw error data to cache: %v", err)
+		// Silent fail
 	}
 
 	// CRITICAL: Save CLEAN data with value=0 and status=OFFLINE to public cache
 	// This ensures parameter remains visible in dashboard
 	cleanCacheKey := fmt.Sprintf("parameter:clean:%d", paramID)
 	if err := w.cache.Set(cleanCacheKey, cleanData, 24*time.Hour); err != nil {
-		log.Warnf("Failed to save clean offline data to cache: %v", err)
-	} else {
-		log.Infof("[OFFLINE] parameter_id=%d, parameter_nama=%s, value=null, status=offline",
-			paramID, paramNama)
+		// Silent fail
 	}
 
 	// CRITICAL: Broadcast CLEAN data with value=0 and status=OFFLINE
 	// This ensures frontend receives update and parameter remains visible
 	if w.wsHub != nil {
-		log.Debugf("[BROADCAST] Broadcasting OFFLINE parameter: parameter_id=%d, value=0", paramID)
 		w.wsHub.BroadcastDataUpdate(cleanData)
 	}
 }

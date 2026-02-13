@@ -67,34 +67,13 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 
 	// Create Modbus client using device config and parameter-level slave_id
 	slaveID := &config.SlaveID
-	log := logger.GetLogger()
-	log.Infof("[READ] Creating Modbus RTU client: parameter_id=%d, device_id=%d, device_nama=%s, port=%s, baud=%d, slave_id=%d, timeout_ms=%d",
-		config.IDParameter, device.ID, device.Nama,
-		func() string {
-			if device.Port != nil {
-				return *device.Port
-			} else {
-				return "nil"
-			}
-		}(),
-		func() int {
-			if device.Baud != nil {
-				return *device.Baud
-			} else {
-				return 0
-			}
-		}(),
-		*slaveID,
-		device.TimeoutMs)
 
 	client, err := modbus.NewRTUClient(device, slaveID)
 	if err != nil {
-		log.Errorf("[READ] Failed to create Modbus RTU client: parameter_id=%d, error=%v", config.IDParameter, err)
 		w.handleError(config.IDParameter, param.Nama, param.Type, err)
 		return fmt.Errorf("failed to create Modbus RTU client: %w", err)
 	}
 	defer client.Close()
-	log.Debugf("[READ] Modbus RTU client created successfully: parameter_id=%d", config.IDParameter)
 
 	// Validate function code
 	if config.FunctionCode == 0 {
@@ -104,20 +83,11 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 	}
 
 	// Read registers
-	log.Debugf("[READ] Reading Modbus: parameter_id=%d, function_code=%d, address=%d, quantity=%d",
-		config.IDParameter, config.FunctionCode, config.RegisterAddress, config.Quantity)
 	data, err := client.Read(ctx, config.FunctionCode, uint16(config.RegisterAddress), uint16(config.Quantity))
 	if err != nil {
-		log.Errorf("[READ] Failed to read Modbus: parameter_id=%d, function_code=%d, address=%d, quantity=%d, error=%v, error_type=%T",
-			config.IDParameter, config.FunctionCode, config.RegisterAddress, config.Quantity, err, err)
 		w.handleError(config.IDParameter, param.Nama, param.Type, err)
 		return err
 	}
-	log.Debugf("[READ] Successfully read Modbus: parameter_id=%d, bytes_received=%d", config.IDParameter, len(data))
-
-	// Log raw data received
-	logger.GetLogger().Debugf("Parameter %d (%s): Raw data received: %v (hex: %X), length: %d bytes",
-		config.IDParameter, param.Nama, data, data, len(data))
 
 	// Convert bytes to value based on data type
 	var rawValueFloat float64
@@ -139,11 +109,7 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 			// For multiple coils/discrete inputs, sum them or use first value
 			// Most common use case: quantity=1, so use first value
 			rawValueFloat = float64(bits[0])
-			logger.GetLogger().Debugf("Parameter %d (%s): FC%d read %d bits, using first bit value: %d",
-				config.IDParameter, param.Nama, config.FunctionCode, len(bits), bits[0])
 		}
-		logger.GetLogger().Debugf("Parameter %d (%s): Converted FC%d bits to value: %.0f (bits: %v)",
-			config.IDParameter, param.Nama, config.FunctionCode, rawValueFloat, bits)
 	} else {
 		// Handle register-based function codes (FC3, FC4, etc.)
 		// Determine data type (default to uint16 if not specified)
@@ -159,19 +125,8 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 			}
 		}
 
-		logger.GetLogger().Debugf("Parameter %d (%s): Using data_type=%s, byte_order=%s, quantity=%d, scaling=%.6f",
-			config.IDParameter, param.Nama, dataType, config.ByteOrder, config.Quantity, config.Scaling)
-
 		// Validate data_type and quantity compatibility
-		if (dataType == "float32" || dataType == "float") && config.Quantity < 2 {
-			logger.GetLogger().Warnf("Parameter %d: data_type is %s but quantity is %d, adjusting quantity to 2", config.IDParameter, dataType, config.Quantity)
-			// Note: We can't change config.Quantity here, but we'll use what we have
-			// The converter will return an error which will be handled
-		} else if dataType == "float64" && config.Quantity < 4 {
-			logger.GetLogger().Warnf("Parameter %d: data_type is float64 but quantity is %d, adjusting quantity to 4", config.IDParameter, config.Quantity)
-		} else if dataType == "int32" && config.Quantity < 2 {
-			logger.GetLogger().Warnf("Parameter %d: data_type is int32 but quantity is %d, adjusting quantity to 2", config.IDParameter, config.Quantity)
-		}
+		// Silent validation
 
 		switch dataType {
 		case "float32", "float": // Support both "float32" and "float" (alias)
@@ -181,7 +136,6 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 				return err
 			}
 			rawValueFloat = float64(rawFloat32)
-			logger.GetLogger().Debugf("Parameter %d (%s): Converted to float32: %.6f", config.IDParameter, param.Nama, rawFloat32)
 		case "float64":
 			rawFloat64, err := modbus.ConvertBytesToFloat64(data, config.ByteOrder, config.Quantity)
 			if err != nil {
@@ -189,7 +143,6 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 				return err
 			}
 			rawValueFloat = rawFloat64
-			logger.GetLogger().Debugf("Parameter %d (%s): Converted to float64: %.6f", config.IDParameter, param.Nama, rawFloat64)
 		case "int32":
 			rawInt32, err := modbus.ConvertBytesToSignedInt32(data, config.ByteOrder, config.Quantity)
 			if err != nil {
@@ -197,7 +150,6 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 				return err
 			}
 			rawValueFloat = float64(rawInt32)
-			logger.GetLogger().Debugf("Parameter %d (%s): Converted to int32: %d", config.IDParameter, param.Nama, rawInt32)
 		default: // uint16, uint32, or default
 			rawValue, err := modbus.ConvertBytesToValue(data, config.ByteOrder, config.Quantity)
 			if err != nil {
@@ -205,16 +157,11 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 				return err
 			}
 			rawValueFloat = float64(rawValue)
-			logger.GetLogger().Debugf("Parameter %d (%s): Converted to uint%d: %d (0x%X)",
-				config.IDParameter, param.Nama,
-				config.Quantity*16, rawValue, rawValue)
 		}
 	}
 
 	// Apply scaling factor
 	scaledValue := rawValueFloat * config.Scaling
-	logger.GetLogger().Debugf("Parameter %d (%s): Raw value: %.6f, Scaling: %.6f, Scaled value: %.6f",
-		config.IDParameter, param.Nama, rawValueFloat, config.Scaling, scaledValue)
 
 	// Evaluate formula if exists
 	var processedValue interface{} = scaledValue
@@ -225,17 +172,13 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 			// Get all parameter values from the same device for field name evaluation
 			fieldValues := w.getFieldValues(param.DeviceID, config.SlaveID, config.RegisterAddress, scaledValue)
 			processed, err := w.formulaEval.EvaluateWithFields(formula, fieldValues)
-			if err != nil {
-				logger.GetLogger().Warnf("Failed to evaluate formula with fields for parameter %d: %v", config.IDParameter, err)
-			} else {
+			if err == nil {
 				processedValue = processed
 			}
 		} else {
 			// Simple formula evaluation with single value
 			processed, err := w.formulaEval.Evaluate(formula, scaledValue)
-			if err != nil {
-				logger.GetLogger().Warnf("Failed to evaluate formula for parameter %d: %v", config.IDParameter, err)
-			} else {
+			if err == nil {
 				processedValue = processed
 			}
 		}
@@ -257,7 +200,6 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 	// GUARD: Only process SOURCE & DIRECT parameters here
 	// CLEAN & FORMULA are handled by Formula Engine, not workers
 	if paramMode != domain.ParameterModeSOURCE && paramMode != domain.ParameterModeDIRECT {
-		logger.GetLogger().Debugf("Skipping non-pollable parameter %d (Mode=%s) - handled by Formula Engine", config.IDParameter, paramMode)
 		return nil
 	}
 
@@ -280,10 +222,7 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 	// ============================================
 	rawCacheKey := fmt.Sprintf("parameter:raw:%d", config.IDParameter)
 	if err := w.cache.Set(rawCacheKey, realtimeData, 24*time.Hour); err != nil {
-		logger.GetLogger().Warnf("Failed to save raw data to cache: %v", err)
-	} else {
-		logger.GetLogger().Infof("[RAW READ] parameter_id=%d, parameter_nama=%s, mode=%s, raw_value=%v, processed_value=%v",
-			config.IDParameter, param.Nama, paramMode, realtimeData.RawValue, realtimeData.ProcessedValue)
+		// Silent fail
 	}
 
 	// ============================================
@@ -293,10 +232,8 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 		// SOURCE: Internal only, tidak dibroadcast
 		// Only notify Formula Engine (for CLEAN derivation)
 		if w.formulaEngine != nil {
-			logger.GetLogger().Debugf("[SOURCE] Notifying Formula Engine: parameter_id=%d", config.IDParameter)
 			w.formulaEngine.OnRawParameterUpdated(config.IDParameter, &realtimeData)
 		}
-		logger.GetLogger().Debugf("[SOURCE] Parameter %d: RAW cached, NOT broadcast (internal only)", config.IDParameter)
 		return nil
 	}
 
@@ -326,21 +263,16 @@ func (w *ModbusRTUWorker) Execute(ctx context.Context, configID uint) error {
 		// Save CLEAN data to public cache (with alarmstatus)
 		cleanCacheKey := fmt.Sprintf("parameter:clean:%d", config.IDParameter)
 		if err := w.cache.Set(cleanCacheKey, cleanData, 24*time.Hour); err != nil {
-			logger.GetLogger().Warnf("Failed to save clean data to cache: %v", err)
-		} else {
-			logger.GetLogger().Infof("[CLEAN EMIT] parameter_id=%d, parameter_nama=%s, clean_value=%v, alarmstatus=%s",
-				config.IDParameter, param.Nama, cleanData.ProcessedValue, cleanData.AlarmStatus)
+			// Silent fail
 		}
 
 		// Broadcast CLEAN data via WebSocket (with alarmstatus)
 		if w.wsHub != nil {
-			logger.GetLogger().Debugf("[BROADCAST] Broadcasting DIRECT parameter clean data: parameter_id=%d", config.IDParameter)
 			w.wsHub.BroadcastDataUpdate(cleanData)
 		}
 
 		// Also notify Formula Engine (for CLEAN derivation if needed)
 		if w.formulaEngine != nil {
-			logger.GetLogger().Debugf("[DIRECT] Notifying Formula Engine: parameter_id=%d", config.IDParameter)
 			w.formulaEngine.OnRawParameterUpdated(config.IDParameter, &realtimeData)
 		}
 
@@ -417,23 +349,19 @@ func (w *ModbusRTUWorker) handleError(paramID uint, paramNama, paramType string,
 		Error:         &errorMsg,
 	}
 	if err := w.cache.Set(rawCacheKey, rawErrorData, 24*time.Hour); err != nil {
-		log.Warnf("Failed to save raw error data to cache: %v", err)
+		// Silent fail
 	}
 
 	// CRITICAL: Save CLEAN data with value=0 and status=OFFLINE to public cache
 	// This ensures parameter remains visible in dashboard
 	cleanCacheKey := fmt.Sprintf("parameter:clean:%d", paramID)
 	if err := w.cache.Set(cleanCacheKey, cleanData, 24*time.Hour); err != nil {
-		log.Warnf("Failed to save clean offline data to cache: %v", err)
-	} else {
-		log.Infof("[OFFLINE] parameter_id=%d, parameter_nama=%s, value=null, status=offline",
-			paramID, paramNama)
+		// Silent fail
 	}
 
 	// CRITICAL: Broadcast CLEAN data with value=0 and status=OFFLINE
 	// This ensures frontend receives update and parameter remains visible
 	if w.wsHub != nil {
-		log.Debugf("[BROADCAST] Broadcasting OFFLINE parameter: parameter_id=%d, value=0", paramID)
 		w.wsHub.BroadcastDataUpdate(cleanData)
 	}
 }
@@ -457,7 +385,6 @@ func (w *ModbusRTUWorker) getFieldValues(deviceID uint, currentSlaveID int, curr
 	// Get all parameters from the same device
 	allParams, err := w.paramRepo.GetByDeviceID(deviceID)
 	if err != nil {
-		logger.GetLogger().Warnf("Failed to get parameters for device %d: %v", deviceID, err)
 		return fieldValues
 	}
 

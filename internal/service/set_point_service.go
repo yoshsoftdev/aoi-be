@@ -64,8 +64,7 @@ func (s *SetPointService) Update(sp *domain.SetPoint) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := s.bypassEngine.OnSetPointChanged(ctx, sp.ID); err != nil {
-			// Log warning but don't fail the update
-			fmt.Printf("Warning: Failed to trigger bypasses for set-point %d: %v\n", sp.ID, err)
+			// Silent fail
 		}
 	}
 
@@ -100,8 +99,7 @@ func (s *SetPointService) UpdateValue(ctx context.Context, setPointID uint, newV
 	// Trigger bypass engine if value changed
 	if oldValue != newValue && s.bypassEngine != nil {
 		if err := s.bypassEngine.OnSetPointChanged(ctx, setPointID); err != nil {
-			// Log warning but don't fail the update
-			fmt.Printf("Warning: Failed to trigger bypasses for set-point %d: %v\n", setPointID, err)
+			// Silent fail
 		}
 	}
 
