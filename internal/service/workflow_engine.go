@@ -19,13 +19,14 @@ import (
 // Workflow hanya bekerja pada parameter_id, tidak tahu register/slave/address
 // Workflow dievaluasi SETELAH data READ bersih (setelah formula engine)
 type WorkflowEngine struct {
-	workflowRepo           repository.WorkflowRepository
-	paramRepo              repository.ParameterRepository
-	alarmRepo              repository.AlarmRepository
-	cache                  cache.Cache
-	writeService           *WriteService
+	workflowRepo             repository.WorkflowRepository
+	paramRepo                repository.ParameterRepository
+	alarmRepo                repository.AlarmRepository
+	setPointRepo             repository.SetPointRepository // For getting setpoint values
+	cache                    cache.Cache
+	writeService             *WriteService
 	internalParameterService *InternalParameterService // For managing internal parameters
-	wsBroadcaster          WebSocketBroadcaster       // For broadcasting alarm notifications
+	wsBroadcaster            WebSocketBroadcaster      // For broadcasting alarm notifications
 	// eventBus     EventBus // TODO: Implement event bus for event actions
 
 	// In-memory registry: parameter_id -> workflows that monitor it
@@ -40,22 +41,24 @@ func NewWorkflowEngine(
 	workflowRepo repository.WorkflowRepository,
 	paramRepo repository.ParameterRepository,
 	alarmRepo repository.AlarmRepository,
+	setPointRepo repository.SetPointRepository,
 	cache cache.Cache,
 	writeService *WriteService,
 	internalParameterService *InternalParameterService,
 	wsBroadcaster WebSocketBroadcaster,
 ) *WorkflowEngine {
 	return &WorkflowEngine{
-		workflowRepo:            workflowRepo,
-		paramRepo:               paramRepo,
-		alarmRepo:               alarmRepo,
-		cache:                   cache,
-		writeService:            writeService,
+		workflowRepo:             workflowRepo,
+		paramRepo:                paramRepo,
+		alarmRepo:                alarmRepo,
+		setPointRepo:             setPointRepo,
+		cache:                    cache,
+		writeService:             writeService,
 		internalParameterService: internalParameterService,
-		wsBroadcaster:           wsBroadcaster,
-		workflowsByParam:        make(map[uint][]*domain.Workflow),
-		debounceMap:             make(map[uint]time.Time),
-		debounceWindow:          5 * time.Second, // Default: 5 seconds debounce
+		wsBroadcaster:            wsBroadcaster,
+		workflowsByParam:         make(map[uint][]*domain.Workflow),
+		debounceMap:              make(map[uint]time.Time),
+		debounceWindow:           5 * time.Second, // Default: 5 seconds debounce
 	}
 }
 
@@ -675,7 +678,7 @@ func (e *WorkflowEngine) evaluateTreeNode(node *domain.TreeNode, state *domain.W
 
 		// Evaluate condition
 		conditionMet := e.evaluateTreeCondition(node.Condition)
-		
+
 		// Check edge trigger: only execute if condition changes from false to true
 		shouldExecute := false
 		if conditionMet {
@@ -797,14 +800,14 @@ func (e *WorkflowEngine) executeTreeNode(workflowID uint, workflow *domain.Workf
 		if err := e.executeTreeAction(workflowID, workflow, node); err != nil {
 			return err
 		}
-		
+
 		// Execute THEN branch for action chaining (sequential actions)
 		for _, child := range node.Then {
 			if err := e.executeTreeNode(workflowID, workflow, &child, depth+1); err != nil {
 				// Continue with next child even if current one fails
 			}
 		}
-		
+
 		return nil
 	}
 
@@ -906,22 +909,60 @@ func (e *WorkflowEngine) executeTreeAction(workflowID uint, workflow *domain.Wor
 		if !ok {
 			return fmt.Errorf("write_dynamic action missing target_id")
 		}
-		value, ok := node.ActionData["value"].(float64)
-		if !ok {
-			return fmt.Errorf("write_dynamic action missing value")
-		}
 
 		targetParamID := uint(targetID)
 		ctx := context.Background()
-		valuePtr := &value
+
+		// Determine value source: static value or setpoint
+		var valuePtr *float64
+		valueSource, hasValueSource := node.ActionData["value_source"].(string)
+
+		if hasValueSource && valueSource == "setpoint" {
+			// Get value from setpoint
+			setpointID, ok := node.ActionData["setpoint_id"].(float64)
+			if !ok {
+				return fmt.Errorf("write_dynamic action with setpoint source missing setpoint_id")
+			}
+
+			// Get setpoint value
+			if e.setPointRepo == nil {
+				return fmt.Errorf("set-point repository not configured")
+			}
+
+			setpoint, err := e.setPointRepo.GetByID(uint(setpointID))
+			if err != nil {
+				return fmt.Errorf("failed to get set-point %d: %w", uint(setpointID), err)
+			}
+
+			valuePtr = &setpoint.Value
+		} else {
+			// Get static value
+			value, ok := node.ActionData["value"].(float64)
+			if !ok {
+				return fmt.Errorf("write_dynamic action missing value")
+			}
+			valuePtr = &value
+		}
+
+		// Use MANUAL mode (same as /write/execute endpoint)
+		// MANUAL mode supports both Value (scalar) and RegisterValues (raw)
 		writeReq := WriteRequest{
-			Mode:         "DYNAMIC",
+			Mode:         "MANUAL",
 			Value:        valuePtr,
 			WorkflowID:   &workflowID,
 			WorkflowNama: &workflow.Nama,
 		}
-		_, err := e.writeService.Write(ctx, targetParamID, writeReq)
-		return err
+
+		result, err := e.writeService.Write(ctx, targetParamID, writeReq)
+		if err != nil {
+			return fmt.Errorf("write service error: %w", err)
+		}
+
+		if !result.Success {
+			return fmt.Errorf("write failed: %s", result.Error)
+		}
+
+		return nil
 
 	case domain.ActionTypeWritePreset:
 		// Extract preset data

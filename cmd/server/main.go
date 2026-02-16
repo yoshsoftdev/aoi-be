@@ -160,11 +160,16 @@ func main() {
 		cacheInstance,
 	)
 
+	// Initialize Set-Point Repository and Service (needed for workflow write actions with setpoint value source)
+	setPointRepo := repository.NewSetPointRepository()
+	setPointService := service.NewSetPointService(setPointRepo)
+
 	// Initialize Workflow Engine (pass wsHub for alarm notifications)
 	workflowEngine := service.NewWorkflowEngine(
 		workflowRepo,
 		paramRepo,
 		alarmRepo,
+		setPointRepo,
 		cacheInstance,
 		writeService,
 		internalParameterService,
@@ -178,9 +183,7 @@ func main() {
 		log.Info("Workflow engine initialized and loaded")
 	}
 
-	// Initialize Set-Point Service
-	setPointRepo := repository.NewSetPointRepository()
-	setPointService := service.NewSetPointService(setPointRepo)
+	// Set-Point Service already initialized above for workflow engine
 
 	// Initialize Bypass Engine
 	bypassRepo := repository.NewBypassRepository()
