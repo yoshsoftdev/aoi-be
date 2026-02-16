@@ -132,12 +132,20 @@ func (r *workflowRepository) Update(workflow *domain.Workflow) error {
 			return err
 		}
 
-		// Update workflow basic fields
-		if err := tx.Model(&domain.Workflow{}).Where("id = ?", workflow.ID).Updates(map[string]interface{}{
+		// Update workflow basic fields (including version and tree_data)
+		updateFields := map[string]interface{}{
 			"nama":        workflow.Nama,
 			"description": workflow.Description,
 			"enabled":     workflow.Enabled,
-		}).Error; err != nil {
+			"version":     workflow.Version,
+		}
+
+		// Only update tree_data if it's provided (not nil)
+		if workflow.TreeData != nil {
+			updateFields["tree_data"] = *workflow.TreeData
+		}
+
+		if err := tx.Model(&domain.Workflow{}).Where("id = ?", workflow.ID).Updates(updateFields).Error; err != nil {
 			return err
 		}
 

@@ -30,6 +30,7 @@ func SetupRoutes(
 	alarmRepo repository.AlarmRepository,
 	writeLogRepo repository.WriteLogRepository,
 	bypassEngine *service.BypassEngine,
+	internalParameterService *service.InternalParameterService,
 ) *gin.Engine {
 	router := gin.Default()
 
@@ -201,6 +202,16 @@ func SetupRoutes(
 			imcConfig.GET("/:cardKey", imcConfigHandler.GetByCardKey)
 			imcConfig.POST("", imcConfigHandler.CreateOrUpdate)
 			imcConfig.DELETE("/:cardKey", imcConfigHandler.Delete)
+		}
+
+		// Internal Parameters (for workflow chaining)
+		internalParamHandler := handlers.NewInternalParameterHandler(internalParameterService)
+		internalParams := v1.Group("/internal-parameters")
+		{
+			internalParams.POST("", internalParamHandler.Create)
+			internalParams.POST("/:id/set-value", internalParamHandler.SetValue)
+			internalParams.POST("/:id/reset", internalParamHandler.ResetValue)
+			internalParams.GET("/:id/value", internalParamHandler.GetValue)
 		}
 
 		// Workflow

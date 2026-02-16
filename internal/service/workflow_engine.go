@@ -19,12 +19,13 @@ import (
 // Workflow hanya bekerja pada parameter_id, tidak tahu register/slave/address
 // Workflow dievaluasi SETELAH data READ bersih (setelah formula engine)
 type WorkflowEngine struct {
-	workflowRepo  repository.WorkflowRepository
-	paramRepo     repository.ParameterRepository
-	alarmRepo     repository.AlarmRepository
-	cache         cache.Cache
-	writeService  *WriteService
-	wsBroadcaster WebSocketBroadcaster // For broadcasting alarm notifications
+	workflowRepo           repository.WorkflowRepository
+	paramRepo              repository.ParameterRepository
+	alarmRepo              repository.AlarmRepository
+	cache                  cache.Cache
+	writeService           *WriteService
+	internalParameterService *InternalParameterService // For managing internal parameters
+	wsBroadcaster          WebSocketBroadcaster       // For broadcasting alarm notifications
 	// eventBus     EventBus // TODO: Implement event bus for event actions
 
 	// In-memory registry: parameter_id -> workflows that monitor it
@@ -41,18 +42,20 @@ func NewWorkflowEngine(
 	alarmRepo repository.AlarmRepository,
 	cache cache.Cache,
 	writeService *WriteService,
+	internalParameterService *InternalParameterService,
 	wsBroadcaster WebSocketBroadcaster,
 ) *WorkflowEngine {
 	return &WorkflowEngine{
-		workflowRepo:     workflowRepo,
-		paramRepo:        paramRepo,
-		alarmRepo:        alarmRepo,
-		cache:            cache,
-		writeService:     writeService,
-		wsBroadcaster:    wsBroadcaster,
-		workflowsByParam: make(map[uint][]*domain.Workflow),
-		debounceMap:      make(map[uint]time.Time),
-		debounceWindow:   5 * time.Second, // Default: 5 seconds debounce
+		workflowRepo:            workflowRepo,
+		paramRepo:               paramRepo,
+		alarmRepo:               alarmRepo,
+		cache:                   cache,
+		writeService:            writeService,
+		internalParameterService: internalParameterService,
+		wsBroadcaster:           wsBroadcaster,
+		workflowsByParam:        make(map[uint][]*domain.Workflow),
+		debounceMap:             make(map[uint]time.Time),
+		debounceWindow:          5 * time.Second, // Default: 5 seconds debounce
 	}
 }
 
@@ -78,10 +81,22 @@ func (e *WorkflowEngine) LoadAll() error {
 			continue
 		}
 
-		// Register workflow for each condition parameter
-		for _, condition := range workflow.Conditions {
-			paramID := condition.ParameterID
-			e.workflowsByParam[paramID] = append(e.workflowsByParam[paramID], workflow)
+		// Version 1: Flat structure - register for condition parameters
+		if workflow.Version == domain.WorkflowVersionFlat || workflow.Version == 0 {
+			for _, condition := range workflow.Conditions {
+				paramID := condition.ParameterID
+				e.workflowsByParam[paramID] = append(e.workflowsByParam[paramID], workflow)
+			}
+		}
+
+		// Version 2: Tree structure - register for trigger source
+		if workflow.Version == domain.WorkflowVersionTree && workflow.TreeData != nil {
+			var tree domain.WorkflowTree
+			if err := json.Unmarshal([]byte(*workflow.TreeData), &tree); err == nil {
+				if tree.Trigger != nil && tree.Trigger.Type == domain.TriggerTypeParameterChanged {
+					e.workflowsByParam[tree.Trigger.SourceID] = append(e.workflowsByParam[tree.Trigger.SourceID], workflow)
+				}
+			}
 		}
 	}
 
@@ -101,8 +116,17 @@ func (e *WorkflowEngine) OnParameterUpdated(parameterID uint, data *domain.Realt
 
 	// Evaluate each workflow
 	for _, workflow := range workflows {
-		if err := e.evaluateWorkflow(workflow, parameterID, data); err != nil {
-			// Silent fail
+		// Route to appropriate execution based on version
+		if workflow.Version == domain.WorkflowVersionTree {
+			// Version 2: Tree-based execution
+			if err := e.evaluateTreeWorkflow(workflow, parameterID, data); err != nil {
+				// Silent fail
+			}
+		} else {
+			// Version 1: Flat execution (backward compatibility)
+			if err := e.evaluateWorkflow(workflow, parameterID, data); err != nil {
+				// Silent fail
+			}
 		}
 	}
 }
@@ -474,6 +498,35 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 		// Send alarm to external HTTP endpoint
 		go e.sendAlarmToHTTPEndpoint(*action.AlarmMessage, workflowID, workflowName)
 
+	case "WRITE_INTERNAL":
+		// WRITE_INTERNAL: write to internal parameter (for workflow chaining)
+		if action.ParameterID == nil {
+			return fmt.Errorf("parameter_id is required for WRITE_INTERNAL action")
+		}
+		if action.Value == nil {
+			return fmt.Errorf("value is required for WRITE_INTERNAL action")
+		}
+
+		// Validate parameter is INTERNAL type
+		param, err := e.paramRepo.GetByID(*action.ParameterID)
+		if err != nil {
+			return fmt.Errorf("failed to get parameter %d: %w", *action.ParameterID, err)
+		}
+
+		if param.Type != "internal" {
+			return fmt.Errorf("parameter %d is not an internal parameter", *action.ParameterID)
+		}
+
+		// Write to internal parameter via InternalParameterService
+		if e.internalParameterService == nil {
+			return fmt.Errorf("internal parameter service is not configured")
+		}
+
+		ctx := context.Background()
+		if err := e.internalParameterService.SetValue(ctx, *action.ParameterID, *action.Value); err != nil {
+			return fmt.Errorf("failed to write internal parameter %d: %w", *action.ParameterID, err)
+		}
+
 	default:
 		return fmt.Errorf("unknown action type: %s", action.ActionType)
 	}
@@ -528,5 +581,366 @@ func (e *WorkflowEngine) sendAlarmToHTTPEndpoint(message string, workflowID uint
 		log.Infof("WorkflowEngine: Alarm sent to HTTP endpoint successfully: workflow=%d (%s), status=%d", workflowID, workflowName, resp.StatusCode)
 	} else {
 		log.Warnf("WorkflowEngine: Alarm sent to HTTP endpoint but received non-2xx status: workflow=%d (%s), status=%d", workflowID, workflowName, resp.StatusCode)
+	}
+}
+
+// evaluateTreeWorkflow evaluates a version 2 tree-based workflow
+func (e *WorkflowEngine) evaluateTreeWorkflow(workflow *domain.Workflow, updatedParamID uint, data *domain.RealtimeData) error {
+	if workflow.TreeData == nil {
+		return fmt.Errorf("workflow %d has no tree_data", workflow.ID)
+	}
+
+	// Parse tree JSON
+	var tree domain.WorkflowTree
+	if err := json.Unmarshal([]byte(*workflow.TreeData), &tree); err != nil {
+		return fmt.Errorf("failed to parse tree_data for workflow %d: %w", workflow.ID, err)
+	}
+
+	// Check if trigger matches
+	if tree.Trigger == nil {
+		return fmt.Errorf("workflow %d has no trigger", workflow.ID)
+	}
+
+	if tree.Trigger.Type == domain.TriggerTypeParameterChanged && tree.Trigger.SourceID != updatedParamID {
+		return nil // Not triggered by this parameter
+	}
+
+	// Check debounce
+	e.mu.RLock()
+	lastExec, exists := e.debounceMap[workflow.ID]
+	e.mu.RUnlock()
+	if exists && time.Since(lastExec) < e.debounceWindow {
+		return nil
+	}
+
+	// Get workflow state for edge trigger
+	state, err := e.workflowRepo.GetStateByWorkflowID(workflow.ID)
+	if err != nil {
+		state = nil
+	}
+
+	// Evaluate root node (recursive)
+	shouldExecute, conditionMet := e.evaluateTreeNode(tree.Root, state, 0)
+
+	// Update state
+	newState := &domain.WorkflowState{
+		WorkflowID: workflow.ID,
+	}
+	if conditionMet {
+		now := time.Now()
+		newState.LastTriggeredAt = &now
+		trueVal := true
+		newState.LastConditionResult = &trueVal
+	} else {
+		falseVal := false
+		newState.LastConditionResult = &falseVal
+	}
+	e.workflowRepo.CreateOrUpdateState(newState)
+
+	// Execute if should execute
+	if shouldExecute {
+		e.mu.Lock()
+		e.debounceMap[workflow.ID] = time.Now()
+		e.mu.Unlock()
+
+		// Execute root node recursively
+		if err := e.executeTreeNode(workflow.ID, workflow, tree.Root, 0); err != nil {
+			return fmt.Errorf("failed to execute tree workflow %d: %w", workflow.ID, err)
+		}
+	}
+
+	return nil
+}
+
+// evaluateTreeNode evaluates a tree node recursively (for edge trigger detection)
+// Returns: (shouldExecute, conditionMet)
+func (e *WorkflowEngine) evaluateTreeNode(node *domain.TreeNode, state *domain.WorkflowState, depth int) (bool, bool) {
+	if depth > 10 { // Max depth safety
+		return false, false
+	}
+
+	if node == nil {
+		return false, false
+	}
+
+	if node.Type == "action" {
+		// Actions don't have conditions, so they don't affect edge trigger
+		return false, false
+	}
+
+	if node.Type == "if" {
+		if node.Condition == nil {
+			return false, false
+		}
+
+		// Evaluate condition
+		conditionMet := e.evaluateTreeCondition(node.Condition)
+		
+		// Check edge trigger: only execute if condition changes from false to true
+		shouldExecute := false
+		if conditionMet {
+			if state == nil || state.LastConditionResult == nil || !*state.LastConditionResult {
+				shouldExecute = true
+			}
+		}
+
+		// Recursively evaluate children
+		if conditionMet {
+			// Evaluate THEN branch
+			for _, child := range node.Then {
+				childShouldExecute, childConditionMet := e.evaluateTreeNode(&child, state, depth+1)
+				if childShouldExecute {
+					shouldExecute = true
+				}
+				if childConditionMet {
+					conditionMet = true
+				}
+			}
+		} else {
+			// Evaluate ELSE branch
+			for _, child := range node.Else {
+				childShouldExecute, childConditionMet := e.evaluateTreeNode(&child, state, depth+1)
+				if childShouldExecute {
+					shouldExecute = true
+				}
+				if childConditionMet {
+					conditionMet = true
+				}
+			}
+		}
+
+		return shouldExecute, conditionMet
+	}
+
+	return false, false
+}
+
+// evaluateTreeCondition evaluates a condition in tree format
+func (e *WorkflowEngine) evaluateTreeCondition(condition *domain.Condition) bool {
+	if condition == nil {
+		return false
+	}
+
+	// Get left value
+	leftValue, err := e.getValueFromSource(condition.Left)
+	if err != nil {
+		return false
+	}
+
+	// Get right value
+	rightValue, err := e.getValueFromSource(condition.Right)
+	if err != nil {
+		return false
+	}
+
+	// Evaluate condition
+	return e.evaluateCondition(leftValue, condition.Operator, rightValue)
+}
+
+// getValueFromSource gets a value from a ValueSource (parameter, setpoint, or static)
+func (e *WorkflowEngine) getValueFromSource(source *domain.ValueSource) (float64, error) {
+	if source == nil {
+		return 0, fmt.Errorf("value source is nil")
+	}
+
+	switch source.Type {
+	case "static":
+		if source.Value == nil {
+			return 0, fmt.Errorf("static value is nil")
+		}
+		return *source.Value, nil
+
+	case "parameter":
+		if source.SourceID == nil {
+			return 0, fmt.Errorf("parameter source_id is nil")
+		}
+		cleanCacheKey := fmt.Sprintf("parameter:clean:%d", *source.SourceID)
+		var paramData *domain.RealtimeData
+		if err := e.cache.Get(cleanCacheKey, &paramData); err != nil {
+			return 0, fmt.Errorf("parameter %d not found in cache: %w", *source.SourceID, err)
+		}
+		if paramData.ProcessedValue == nil {
+			return 0, fmt.Errorf("parameter %d has no value", *source.SourceID)
+		}
+		if v, ok := paramData.ProcessedValue.(float64); ok {
+			return v, nil
+		} else if v, ok := paramData.ProcessedValue.(int); ok {
+			return float64(v), nil
+		} else if v, ok := paramData.ProcessedValue.(int32); ok {
+			return float64(v), nil
+		} else if v, ok := paramData.ProcessedValue.(int64); ok {
+			return float64(v), nil
+		}
+		return 0, fmt.Errorf("parameter %d value is not a number", *source.SourceID)
+
+	case "setpoint":
+		// TODO: Implement setpoint value retrieval
+		return 0, fmt.Errorf("setpoint value source not yet implemented")
+
+	default:
+		return 0, fmt.Errorf("unknown value source type: %s", source.Type)
+	}
+}
+
+// executeTreeNode executes a tree node recursively
+func (e *WorkflowEngine) executeTreeNode(workflowID uint, workflow *domain.Workflow, node *domain.TreeNode, depth int) error {
+	if depth > 10 { // Max depth safety
+		return fmt.Errorf("max depth exceeded")
+	}
+
+	if node == nil {
+		return nil
+	}
+
+	if node.Type == "action" {
+		// Execute action
+		if err := e.executeTreeAction(workflowID, workflow, node); err != nil {
+			return err
+		}
+		
+		// Execute THEN branch for action chaining (sequential actions)
+		for _, child := range node.Then {
+			if err := e.executeTreeNode(workflowID, workflow, &child, depth+1); err != nil {
+				// Continue with next child even if current one fails
+			}
+		}
+		
+		return nil
+	}
+
+	if node.Type == "if" {
+		if node.Condition == nil {
+			return fmt.Errorf("IF node has no condition")
+		}
+
+		// Evaluate condition
+		conditionMet := e.evaluateTreeCondition(node.Condition)
+
+		// Execute appropriate branch
+		if conditionMet {
+			// Execute THEN branch
+			for _, child := range node.Then {
+				if err := e.executeTreeNode(workflowID, workflow, &child, depth+1); err != nil {
+					// Continue with next child even if current one fails
+				}
+			}
+		} else {
+			// Execute ELSE branch
+			for _, child := range node.Else {
+				if err := e.executeTreeNode(workflowID, workflow, &child, depth+1); err != nil {
+					// Continue with next child even if current one fails
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// executeTreeAction executes an action node from tree structure
+func (e *WorkflowEngine) executeTreeAction(workflowID uint, workflow *domain.Workflow, node *domain.TreeNode) error {
+	if node.ActionData == nil {
+		return fmt.Errorf("action node has no action_data")
+	}
+
+	switch node.ActionType {
+	case domain.ActionTypeAlarmNotification:
+		// Extract alarm data
+		title, _ := node.ActionData["title"].(string)
+		message, _ := node.ActionData["message"].(string)
+		severity, _ := node.ActionData["severity"].(string)
+		if severity == "" {
+			severity = "info" // Default severity
+		}
+
+		if message == "" {
+			message = title // Fallback to title if message is empty
+		}
+		if message == "" {
+			message = "Alarm triggered" // Default message
+		}
+
+		// Get parameter info for alarm (use first condition's parameter if available)
+		var parameterID uint
+		var parameterName *string
+		if workflow.TreeData != nil {
+			var treeWorkflow domain.WorkflowTree
+			if err := json.Unmarshal([]byte(*workflow.TreeData), &treeWorkflow); err == nil {
+				if treeWorkflow.Trigger.Type == domain.TriggerTypeParameterChanged {
+					parameterID = treeWorkflow.Trigger.SourceID
+					param, err := e.paramRepo.GetByID(parameterID)
+					if err == nil && param != nil {
+						parameterName = &param.Nama
+					}
+				}
+			}
+		}
+
+		// Create or update alarm in current_alarm table
+		alarm := &domain.CurrentAlarm{
+			WorkflowID:    workflowID,
+			WorkflowName:  workflow.Nama,
+			ParameterID:   parameterID,
+			ParameterName: parameterName,
+			AlarmMessage:  message,
+			TriggeredAt:   time.Now(),
+		}
+
+		if err := e.alarmRepo.CreateOrUpdate(alarm); err != nil {
+			return fmt.Errorf("failed to save alarm: %w", err)
+		}
+
+		// Broadcast alarm notification via WebSocket
+		if e.wsBroadcaster != nil {
+			e.wsBroadcaster.BroadcastAlarm(workflowID, workflow.Nama, message)
+		}
+
+		// Send alarm to external HTTP endpoint
+		go e.sendAlarmToHTTPEndpoint(message, workflowID, workflow.Nama)
+
+		return nil
+
+	case domain.ActionTypeWriteDynamic:
+		// Extract write data
+		targetID, ok := node.ActionData["target_id"].(float64)
+		if !ok {
+			return fmt.Errorf("write_dynamic action missing target_id")
+		}
+		value, ok := node.ActionData["value"].(float64)
+		if !ok {
+			return fmt.Errorf("write_dynamic action missing value")
+		}
+
+		targetParamID := uint(targetID)
+		ctx := context.Background()
+		valuePtr := &value
+		writeReq := WriteRequest{
+			Mode:         "DYNAMIC",
+			Value:        valuePtr,
+			WorkflowID:   &workflowID,
+			WorkflowNama: &workflow.Nama,
+		}
+		_, err := e.writeService.Write(ctx, targetParamID, writeReq)
+		return err
+
+	case domain.ActionTypeWritePreset:
+		// Extract preset data
+		targetID, ok := node.ActionData["target_id"].(float64)
+		if !ok {
+			return fmt.Errorf("write_preset action missing target_id")
+		}
+
+		targetParamID := uint(targetID)
+		ctx := context.Background()
+		writeReq := WriteRequest{
+			Mode:         "TRIGGER",
+			WorkflowID:   &workflowID,
+			WorkflowNama: &workflow.Nama,
+		}
+		_, err := e.writeService.Write(ctx, targetParamID, writeReq)
+		return err
+
+	default:
+		return fmt.Errorf("unknown action type: %s", node.ActionType)
 	}
 }

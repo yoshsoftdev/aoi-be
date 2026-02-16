@@ -4,15 +4,19 @@ import "time"
 
 // Workflow represents a workflow rule
 // Workflow hanya bekerja pada parameter_id, tidak tahu register/slave/address
+// Version 1: Flat structure (conditions[], actions[])
+// Version 2: Tree structure (tree_data JSON)
 type Workflow struct {
 	ID          uint      `gorm:"primaryKey" json:"id"`
 	Nama        string    `gorm:"size:100;not null" json:"nama"`
 	Description string    `gorm:"type:text" json:"description"`
 	Enabled     bool      `gorm:"default:1" json:"enabled"`
+	Version     int       `gorm:"default:1" json:"version"`     // 1 = flat, 2 = tree
+	TreeData    *string   `gorm:"type:text" json:"tree_data,omitempty"` // JSON tree structure for version 2
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 
-	// Relations
+	// Relations (for version 1 only)
 	Conditions []WorkflowCondition `gorm:"foreignKey:WorkflowID;constraint:OnDelete:CASCADE" json:"conditions,omitempty"`
 	Actions    []WorkflowAction    `gorm:"foreignKey:WorkflowID;constraint:OnDelete:CASCADE" json:"actions,omitempty"`
 	State      *WorkflowState      `gorm:"foreignKey:WorkflowID;constraint:OnDelete:CASCADE" json:"state,omitempty"`

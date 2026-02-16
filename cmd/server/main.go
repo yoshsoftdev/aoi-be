@@ -154,6 +154,12 @@ func main() {
 		writeLogRepo,
 	)
 
+	// Initialize Internal Parameter Service (for workflow chaining)
+	internalParameterService := service.NewInternalParameterService(
+		paramRepo,
+		cacheInstance,
+	)
+
 	// Initialize Workflow Engine (pass wsHub for alarm notifications)
 	workflowEngine := service.NewWorkflowEngine(
 		workflowRepo,
@@ -161,6 +167,7 @@ func main() {
 		alarmRepo,
 		cacheInstance,
 		writeService,
+		internalParameterService,
 		wsHub, // Pass WebSocketHub for broadcasting alarms
 	)
 
@@ -260,6 +267,7 @@ func main() {
 		alarmRepo,
 		writeLogRepo,
 		bypassEngine,
+		internalParameterService,
 	)
 	log.Info("Routes configured successfully")
 
