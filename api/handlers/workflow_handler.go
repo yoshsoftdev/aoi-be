@@ -72,17 +72,17 @@ func (h *WorkflowHandler) GetByID(c *gin.Context) {
 // CreateRequest represents a workflow creation request
 // Supports both version 1 (flat) and version 2 (tree) workflows
 type CreateWorkflowRequest struct {
-	Nama        string                    `json:"nama" binding:"required"`
-	Description string                    `json:"description"`
-	Enabled     bool                      `json:"enabled"`
-	Version     *int                      `json:"version,omitempty"` // 1 = flat, 2 = tree (default: 1)
-	
+	Nama        string `json:"nama" binding:"required"`
+	Description string `json:"description"`
+	Enabled     bool   `json:"enabled"`
+	Version     *int   `json:"version,omitempty"` // 1 = flat, 2 = tree (default: 1)
+
 	// Version 1 (flat) fields
-	Conditions  []CreateWorkflowCondition `json:"conditions,omitempty"`
-	Actions     []CreateWorkflowAction    `json:"actions,omitempty"`
-	
+	Conditions []CreateWorkflowCondition `json:"conditions,omitempty"`
+	Actions    []CreateWorkflowAction    `json:"actions,omitempty"`
+
 	// Version 2 (tree) fields
-	TreeData    *domain.WorkflowTree      `json:"tree_data,omitempty"`
+	TreeData *domain.WorkflowTree `json:"tree_data,omitempty"`
 }
 
 type CreateWorkflowCondition struct {
@@ -271,17 +271,17 @@ func (h *WorkflowHandler) Create(c *gin.Context) {
 // UpdateRequest represents a workflow update request
 // Supports both version 1 (flat) and version 2 (tree) workflows
 type UpdateWorkflowRequest struct {
-	Nama        *string                   `json:"nama"`
-	Description *string                   `json:"description"`
-	Enabled     *bool                     `json:"enabled"`
-	Version     *int                      `json:"version,omitempty"` // 1 = flat, 2 = tree
-	
+	Nama        *string `json:"nama"`
+	Description *string `json:"description"`
+	Enabled     *bool   `json:"enabled"`
+	Version     *int    `json:"version,omitempty"` // 1 = flat, 2 = tree
+
 	// Version 1 (flat) fields
-	Conditions  []CreateWorkflowCondition `json:"conditions,omitempty"`
-	Actions     []CreateWorkflowAction    `json:"actions,omitempty"`
-	
+	Conditions []CreateWorkflowCondition `json:"conditions,omitempty"`
+	Actions    []CreateWorkflowAction    `json:"actions,omitempty"`
+
 	// Version 2 (tree) fields
-	TreeData    *domain.WorkflowTree      `json:"tree_data,omitempty"`
+	TreeData *domain.WorkflowTree `json:"tree_data,omitempty"`
 }
 
 // Update updates a workflow
@@ -297,9 +297,10 @@ func (h *WorkflowHandler) Update(c *gin.Context) {
 
 	var req UpdateWorkflowRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		logger.GetLogger().Errorf("Failed to bind update workflow request for ID %d: %v", id, err)
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
-			"error":   err.Error(),
+			"error":   "Invalid request: " + err.Error(),
 		})
 		return
 	}
@@ -307,12 +308,15 @@ func (h *WorkflowHandler) Update(c *gin.Context) {
 	// Get existing workflow
 	workflow, err := h.workflowRepo.GetByID(uint(id))
 	if err != nil {
+		logger.GetLogger().Errorf("Workflow not found: ID %d, error: %v", id, err)
 		c.JSON(http.StatusNotFound, gin.H{
 			"success": false,
 			"error":   "Workflow not found",
 		})
 		return
 	}
+
+	logger.GetLogger().Infof("Updating workflow %d: version=%v, hasTreeData=%v", id, req.Version, req.TreeData != nil)
 
 	// Update fields
 	if req.Nama != nil {
@@ -334,9 +338,10 @@ func (h *WorkflowHandler) Update(c *gin.Context) {
 		if req.TreeData != nil {
 			// Validate tree structure
 			if err := validateWorkflowTree(req.TreeData); err != nil {
+				logger.GetLogger().Errorf("Workflow tree validation failed: %v", err)
 				c.JSON(http.StatusBadRequest, gin.H{
 					"success": false,
-					"error":   err.Error(),
+					"error":   "Tree validation failed: " + err.Error(),
 				})
 				return
 			}
@@ -356,7 +361,7 @@ func (h *WorkflowHandler) Update(c *gin.Context) {
 
 			treeJSONStr := string(treeJSON)
 			workflow.TreeData = &treeJSONStr
-			
+
 			// Clear flat structure when switching to tree
 			workflow.Conditions = []domain.WorkflowCondition{}
 			workflow.Actions = []domain.WorkflowAction{}
@@ -386,7 +391,7 @@ func (h *WorkflowHandler) Update(c *gin.Context) {
 				})
 			}
 		}
-		
+
 		// Clear tree data when switching to flat
 		if req.Version != nil && *req.Version == domain.WorkflowVersionFlat {
 			workflow.TreeData = nil
@@ -539,15 +544,25 @@ func validateTreeNode(node *domain.TreeNode, depth int, maxDepth int, visited ma
 		}
 
 		// Recursively validate THEN branch
+		// Create a copy of visited map for each branch to allow same node in different branches
 		for i, child := range node.Then {
-			if err := validateTreeNode(&child, depth+1, maxDepth, visited); err != nil {
+			thenVisited := make(map[string]bool)
+			for k, v := range visited {
+				thenVisited[k] = v
+			}
+			if err := validateTreeNode(&child, depth+1, maxDepth, thenVisited); err != nil {
 				return fmt.Errorf("then[%d]: %w", i, err)
 			}
 		}
 
 		// Recursively validate ELSE branch
+		// Create a copy of visited map for each branch to allow same node in different branches
 		for i, child := range node.Else {
-			if err := validateTreeNode(&child, depth+1, maxDepth, visited); err != nil {
+			elseVisited := make(map[string]bool)
+			for k, v := range visited {
+				elseVisited[k] = v
+			}
+			if err := validateTreeNode(&child, depth+1, maxDepth, elseVisited); err != nil {
 				return fmt.Errorf("else[%d]: %w", i, err)
 			}
 		}
@@ -575,8 +590,16 @@ func validateTreeNode(node *domain.TreeNode, depth int, maxDepth int, visited ma
 		}
 
 		// Recursively validate THEN branch (for action chaining)
+		// For action chaining, we need to check for cycles within the same chain
+		// But allow the same node to appear in different parallel chains
+		// So we create a copy of visited for each child to allow parallel chains
 		for i, child := range node.Then {
-			if err := validateTreeNode(&child, depth+1, maxDepth, visited); err != nil {
+			// Create a copy of visited map for each child to allow parallel action chains
+			childVisited := make(map[string]bool)
+			for k, v := range visited {
+				childVisited[k] = v
+			}
+			if err := validateTreeNode(&child, depth+1, maxDepth, childVisited); err != nil {
 				return fmt.Errorf("action then[%d]: %w", i, err)
 			}
 		}
@@ -594,12 +617,22 @@ func validateTreeNode(node *domain.TreeNode, depth int, maxDepth int, visited ma
 			}
 
 		case domain.ActionTypeWriteDynamic:
-			// Write dynamic requires target_id and value
+			// Write dynamic requires target_id
 			if _, ok := node.ActionData["target_id"]; !ok {
 				return fmt.Errorf("write_dynamic action requires 'target_id' in action_data")
 			}
-			if _, ok := node.ActionData["value"]; !ok {
-				return fmt.Errorf("write_dynamic action requires 'value' in action_data")
+			// Value can come from either static value or setpoint
+			valueSource, hasValueSource := node.ActionData["value_source"]
+			if hasValueSource && valueSource == "setpoint" {
+				// If value_source is setpoint, require setpoint_id
+				if _, ok := node.ActionData["setpoint_id"]; !ok {
+					return fmt.Errorf("write_dynamic action with setpoint source requires 'setpoint_id' in action_data")
+				}
+			} else {
+				// Otherwise, require value (static)
+				if _, ok := node.ActionData["value"]; !ok {
+					return fmt.Errorf("write_dynamic action requires 'value' in action_data (or 'setpoint_id' if value_source is 'setpoint')")
+				}
 			}
 
 		case domain.ActionTypeWritePreset:
