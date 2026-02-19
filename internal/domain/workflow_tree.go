@@ -24,9 +24,9 @@ type TriggerNode struct {
 }
 
 // TreeNode represents a node in the workflow tree
-// Can be either an IF node or an Action node
+// Can be either an IF node, Action node, or Timer node
 type TreeNode struct {
-	Type string `json:"type"`         // "if" or "action"
+	Type string `json:"type"`         // "if", "action", or "timer"
 	ID   string `json:"id,omitempty"` // node ID (for reference)
 
 	// For IF nodes
@@ -37,6 +37,15 @@ type TreeNode struct {
 	// For Action nodes
 	ActionType string                 `json:"action_type,omitempty"` // "ALARM_NOTIFICATION", "WRITE_DYNAMIC", "WRITE_PRESET"
 	ActionData map[string]interface{} `json:"action_data,omitempty"` // Action-specific data
+
+	// For Timer nodes
+	TimerData *TimerData `json:"timer_data,omitempty"` // Timer-specific data (duration, unit)
+}
+
+// TimerData represents timer node configuration
+type TimerData struct {
+	Duration int    `json:"duration"` // Duration value
+	Unit     string `json:"unit"`     // "seconds", "minutes", "hours"
 }
 
 // Condition represents a condition in an IF node

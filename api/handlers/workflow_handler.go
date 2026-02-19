@@ -501,8 +501,8 @@ func validateTreeNode(node *domain.TreeNode, depth int, maxDepth int, visited ma
 	}
 
 	// Validate node type
-	if node.Type != "if" && node.Type != "action" {
-		return fmt.Errorf("invalid node type: %s (must be 'if' or 'action')", node.Type)
+	if node.Type != "if" && node.Type != "action" && node.Type != "timer" {
+		return fmt.Errorf("invalid node type: %s (must be 'if', 'action', or 'timer')", node.Type)
 	}
 
 	if node.Type == "if" {
@@ -564,6 +564,36 @@ func validateTreeNode(node *domain.TreeNode, depth int, maxDepth int, visited ma
 			}
 			if err := validateTreeNode(&child, depth+1, maxDepth, elseVisited); err != nil {
 				return fmt.Errorf("else[%d]: %w", i, err)
+			}
+		}
+	} else if node.Type == "timer" {
+		// Validate timer node
+		if node.TimerData == nil {
+			return fmt.Errorf("timer node timer_data is required")
+		}
+		if node.TimerData.Duration <= 0 {
+			return fmt.Errorf("timer duration must be greater than 0")
+		}
+		validUnits := []string{"seconds", "minutes", "hours"}
+		valid := false
+		for _, unit := range validUnits {
+			if node.TimerData.Unit == unit {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("invalid timer unit: %s (must be seconds, minutes, or hours)", node.TimerData.Unit)
+		}
+
+		// Recursively validate THEN branch (for continuing after delay)
+		childVisited := make(map[string]bool)
+		for k, v := range visited {
+			childVisited[k] = v
+		}
+		for i, child := range node.Then {
+			if err := validateTreeNode(&child, depth+1, maxDepth, childVisited); err != nil {
+				return fmt.Errorf("timer then[%d]: %w", i, err)
 			}
 		}
 	} else if node.Type == "action" {

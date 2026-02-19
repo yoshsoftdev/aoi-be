@@ -811,6 +811,39 @@ func (e *WorkflowEngine) executeTreeNode(workflowID uint, workflow *domain.Workf
 		return nil
 	}
 
+	if node.Type == "timer" {
+		// Execute timer delay
+		if node.TimerData == nil {
+			return fmt.Errorf("timer node has no timer_data")
+		}
+
+		// Calculate delay duration
+		var delay time.Duration
+		switch node.TimerData.Unit {
+		case "seconds":
+			delay = time.Duration(node.TimerData.Duration) * time.Second
+		case "minutes":
+			delay = time.Duration(node.TimerData.Duration) * time.Minute
+		case "hours":
+			delay = time.Duration(node.TimerData.Duration) * time.Hour
+		default:
+			return fmt.Errorf("invalid timer unit: %s", node.TimerData.Unit)
+		}
+
+		// Sleep for the specified duration
+		// This blocks the workflow execution thread
+		time.Sleep(delay)
+
+		// Execute THEN branch to continue to next node
+		for _, child := range node.Then {
+			if err := e.executeTreeNode(workflowID, workflow, &child, depth+1); err != nil {
+				// Continue with next child even if current one fails
+			}
+		}
+
+		return nil
+	}
+
 	if node.Type == "if" {
 		if node.Condition == nil {
 			return fmt.Errorf("IF node has no condition")
