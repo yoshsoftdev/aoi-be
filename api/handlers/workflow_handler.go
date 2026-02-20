@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"aoi-backend/internal/core/logger"
 	"aoi-backend/internal/domain"
@@ -511,36 +512,76 @@ func validateTreeNode(node *domain.TreeNode, depth int, maxDepth int, visited ma
 			return fmt.Errorf("IF node condition is required")
 		}
 
-		// Validate condition
-		if node.Condition.Left == nil {
-			return fmt.Errorf("condition left is required")
-		}
-		if node.Condition.Right == nil {
-			return fmt.Errorf("condition right is required")
-		}
-		if node.Condition.Operator == "" {
-			return fmt.Errorf("condition operator is required")
+		// Check condition type
+		conditionType := node.Condition.Type
+		if conditionType == "" {
+			conditionType = "comparison" // Default type
 		}
 
-		// Validate operator
-		validOperators := []string{">", "<", ">=", "<=", "==", "!="}
-		valid := false
-		for _, op := range validOperators {
-			if node.Condition.Operator == op {
-				valid = true
-				break
+		if conditionType == "time_window" {
+			// Validate time window condition
+			if node.Condition.TimeWindow == nil {
+				return fmt.Errorf("time_window condition requires time_window config")
 			}
-		}
-		if !valid {
-			return fmt.Errorf("invalid operator: %s", node.Condition.Operator)
-		}
+			if node.Condition.TimeWindow.StartTime == "" {
+				return fmt.Errorf("time_window start_time is required")
+			}
+			if node.Condition.TimeWindow.EndTime == "" {
+				return fmt.Errorf("time_window end_time is required")
+			}
+			// Validate time format by trying to evaluate
+			_, err := domain.EvaluateTimeWindow(*node.Condition.TimeWindow)
+			if err != nil {
+				return fmt.Errorf("time_window validation failed: %w", err)
+			}
+			// Validate days if provided
+			if len(node.Condition.TimeWindow.Days) > 0 {
+				validDays := []string{"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+				for _, day := range node.Condition.TimeWindow.Days {
+					valid := false
+					for _, validDay := range validDays {
+						if strings.ToLower(day) == validDay {
+							valid = true
+							break
+						}
+					}
+					if !valid {
+						return fmt.Errorf("invalid day in time_window days: %s (must be mon, tue, wed, thu, fri, sat, or sun)", day)
+					}
+				}
+			}
+		} else {
+			// Validate comparison condition (default)
+			if node.Condition.Left == nil {
+				return fmt.Errorf("comparison condition left is required")
+			}
+			if node.Condition.Right == nil {
+				return fmt.Errorf("comparison condition right is required")
+			}
+			if node.Condition.Operator == "" {
+				return fmt.Errorf("comparison condition operator is required")
+			}
 
-		// Validate value sources
-		if err := validateValueSource(node.Condition.Left); err != nil {
-			return fmt.Errorf("condition left: %w", err)
-		}
-		if err := validateValueSource(node.Condition.Right); err != nil {
-			return fmt.Errorf("condition right: %w", err)
+			// Validate operator
+			validOperators := []string{">", "<", ">=", "<=", "==", "!="}
+			valid := false
+			for _, op := range validOperators {
+				if node.Condition.Operator == op {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				return fmt.Errorf("invalid operator: %s", node.Condition.Operator)
+			}
+
+			// Validate value sources
+			if err := validateValueSource(node.Condition.Left); err != nil {
+				return fmt.Errorf("condition left: %w", err)
+			}
+			if err := validateValueSource(node.Condition.Right); err != nil {
+				return fmt.Errorf("condition right: %w", err)
+			}
 		}
 
 		// Recursively validate THEN branch

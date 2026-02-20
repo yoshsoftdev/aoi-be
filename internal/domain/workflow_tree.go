@@ -50,9 +50,11 @@ type TimerData struct {
 
 // Condition represents a condition in an IF node
 type Condition struct {
-	Left     *ValueSource `json:"left"`     // Left side of condition
-	Operator string       `json:"operator"` // ">", "<", ">=", "<=", "==", "!="
-	Right    *ValueSource `json:"right"`    // Right side of condition
+	Left       *ValueSource      `json:"left,omitempty"`        // Left side of condition (for parameter/setpoint comparison)
+	Operator   string            `json:"operator,omitempty"`    // ">", "<", ">=", "<=", "==", "!=" (for parameter/setpoint comparison)
+	Right      *ValueSource      `json:"right,omitempty"`       // Right side of condition (for parameter/setpoint comparison)
+	Type       string            `json:"type,omitempty"`        // "comparison" (default) or "time_window"
+	TimeWindow *TimeWindowConfig `json:"time_window,omitempty"` // Time window configuration (for time_window type)
 }
 
 // ValueSource represents a value source (parameter, setpoint, or static value)

@@ -724,6 +724,20 @@ func (e *WorkflowEngine) evaluateTreeCondition(condition *domain.Condition) bool
 		return false
 	}
 
+	// Check if this is a time window condition
+	if condition.Type == "time_window" {
+		if condition.TimeWindow == nil {
+			return false
+		}
+		result, err := domain.EvaluateTimeWindow(*condition.TimeWindow)
+		if err != nil {
+			// Log error but return false
+			return false
+		}
+		return result
+	}
+
+	// Default: parameter/setpoint comparison condition
 	// Get left value
 	leftValue, err := e.getValueFromSource(condition.Left)
 	if err != nil {
