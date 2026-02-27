@@ -36,6 +36,7 @@ type SchedulerManager struct {
 	modbusRTUWorker *worker.ModbusRTUWorker
 	modbusTCPWorker *worker.ModbusTCPWorker
 	snmpWorker      *worker.SNMPWorker
+	httpWorker      *worker.HTTPWorker
 	db              *gorm.DB
 
 	// Per-connection polling workers (round-robin) - only for Modbus
@@ -53,6 +54,7 @@ func NewSchedulerManager(
 	modbusRTUWorker *worker.ModbusRTUWorker,
 	modbusTCPWorker *worker.ModbusTCPWorker,
 	snmpWorker *worker.SNMPWorker,
+	httpWorker *worker.HTTPWorker,
 ) *SchedulerManager {
 	return &SchedulerManager{
 		cron:            cron.New(cron.WithSeconds()),
@@ -62,6 +64,7 @@ func NewSchedulerManager(
 		modbusRTUWorker: modbusRTUWorker,
 		modbusTCPWorker: modbusTCPWorker,
 		snmpWorker:      snmpWorker,
+		httpWorker:      httpWorker,
 		db:              database.GetDB(),
 		pollingWorkers:  make(map[uint]*ConnectionPollingWorker),
 	}
@@ -275,9 +278,61 @@ func (s *SchedulerManager) loadAndScheduleAll() {
 		}
 	}
 
+	// Load HTTP Config with Parameter and Device
+	// CRITICAL: Only poll SOURCE & DIRECT parameters (not CLEAN, not FORMULA)
+	var httpConfigs []domain.HTTPConfig
+	s.db.Preload("Parameter.Device").
+		Joins("JOIN parameters ON parameters.id = http_config.id_parameter").
+		Where("(parameters.direction = ? OR parameters.direction = ? OR (parameters.direction = '' AND (parameters.read_write = 0 OR parameters.read_write = 2)))", "READ", "READ_WRITE").
+		Where("(parameters.parameter_mode = ? OR parameters.parameter_mode = ? OR (parameters.parameter_mode = '' OR parameters.parameter_mode IS NULL))", domain.ParameterModeSOURCE, domain.ParameterModeDIRECT).
+		Find(&httpConfigs)
+
+	httpJobs := []PollingJob{}
+	for _, config := range httpConfigs {
+		// Default to SOURCE if parameter_mode is empty/null
+		paramMode := config.Parameter.ParameterMode
+		if paramMode == "" {
+			paramMode = domain.ParameterModeSOURCE
+		}
+
+		// GUARD: Skip WRITE parameters (but allow READ_WRITE for polling)
+		if config.Parameter.Direction == "WRITE" {
+			continue
+		}
+
+		// GUARD: Only poll SOURCE & DIRECT
+		if paramMode != domain.ParameterModeSOURCE && paramMode != domain.ParameterModeDIRECT {
+			continue
+		}
+
+		pollingMs := s.getPollingMs(&config.PollingMs, &config.Parameter)
+
+		if pollingMs > 0 {
+			// CRITICAL FIX: Capture config.ID in local variable to avoid closure issue
+			configID := config.ID
+			// HTTP jobs go to separate list for parallel execution (no queue)
+			httpJobs = append(httpJobs, PollingJob{
+				ConfigID:     config.ID,
+				ParameterID:  config.IDParameter,
+				ConnectionID: config.Parameter.DeviceID,
+				SlaveID:      0, // HTTP doesn't have slave_id, use 0
+				JobType:      "http",
+				PollingMs:    pollingMs,
+				ExecuteFn: func(ctx context.Context) error {
+					return s.httpWorker.Execute(ctx, configID)
+				},
+			})
+		}
+	}
+
 	// Schedule SNMP jobs separately (parallel execution, no queue)
 	for _, job := range snmpJobs {
 		s.scheduleSNMPJob(job)
+	}
+
+	// Schedule HTTP jobs separately (parallel execution, no queue)
+	for _, job := range httpJobs {
+		s.scheduleSNMPJob(job) // Reuse SNMP scheduling logic for HTTP (parallel execution)
 	}
 
 	// Group Modbus jobs by connection (for queue/sequential execution)
@@ -327,10 +382,10 @@ func (s *SchedulerManager) scheduleSNMPJob(job PollingJob) {
 	cronExpr := fmt.Sprintf("*/%d * * * * *", pollingSeconds)
 
 	// Capture job variables for closure
-	configID := job.ConfigID
 	parameterID := job.ParameterID
+	executeFn := job.ExecuteFn // Capture ExecuteFn for closure
 
-	// Schedule cron job for this SNMP parameter
+	// Schedule cron job for this SNMP/HTTP parameter
 	// CRITICAL: Add panic recovery and semaphore to prevent crashes and resource exhaustion
 	entryID, err := s.cron.AddFunc(cronExpr, func() {
 		// Panic recovery to prevent crash
@@ -340,8 +395,8 @@ func (s *SchedulerManager) scheduleSNMPJob(job PollingJob) {
 			}
 		}()
 
-		// Acquire semaphore to limit concurrent SNMP requests
-		// This prevents resource exhaustion when many SNMP parameters are polled simultaneously
+		// Acquire semaphore to limit concurrent requests
+		// This prevents resource exhaustion when many parameters are polled simultaneously
 		select {
 		case s.snmpSemaphore <- struct{}{}:
 			// Acquired semaphore, proceed with execution
@@ -357,8 +412,10 @@ func (s *SchedulerManager) scheduleSNMPJob(job PollingJob) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
 
-		// Execute SNMP poll with error handling
-		_ = s.snmpWorker.Execute(ctx, configID)
+		// Execute job using ExecuteFn (supports both SNMP and HTTP)
+		if executeFn != nil {
+			_ = executeFn(ctx)
+		}
 	})
 
 	if err != nil {

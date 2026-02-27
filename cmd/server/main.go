@@ -79,6 +79,7 @@ func main() {
 	modbusRTURepo := repository.NewModbusRTURepository()
 	modbusTCPRepo := repository.NewModbusTCPRepository()
 	snmpRepo := repository.NewSNMPRepository()
+	httpRepo := repository.NewHTTPRepository()
 	formulaRepo := repository.NewFormulaRepository()
 	presetRepo := repository.NewPresetRepository()
 	workflowRepo := repository.NewWorkflowRepository(database.GetDB())
@@ -246,11 +247,21 @@ func main() {
 		wsHub,
 	)
 
+	httpWorker := worker.NewHTTPWorker(
+		httpRepo,
+		paramRepo,
+		cacheInstance,
+		formulaEval,
+		thresholdService,
+		wsHub,
+	)
+
 	// Initialize scheduler (but don't start yet)
 	schedulerManager := scheduler.NewSchedulerManager(
 		modbusRTUWorker,
 		modbusTCPWorker,
 		snmpWorker,
+		httpWorker,
 	)
 	log.Info("Scheduler initialized (not started yet)")
 
@@ -261,6 +272,7 @@ func main() {
 		modbusRTURepo,
 		modbusTCPRepo,
 		snmpRepo,
+		httpRepo,
 		cacheInstance,
 		wsHub,
 		schedulerManager,
@@ -321,6 +333,7 @@ func runMigrations() error {
 		&domain.ModbusRTU{},
 		&domain.ModbusTCP{},
 		&domain.SNMPConfig{},
+		&domain.HTTPConfig{},
 		&domain.AnalogInput{},
 		&domain.AnalogOutput{},
 		&domain.DigitalInput{},

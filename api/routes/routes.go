@@ -21,6 +21,7 @@ func SetupRoutes(
 	modbusRTURepo repository.ModbusRTURepository,
 	modbusTCPRepo repository.ModbusTCPRepository,
 	snmpRepo repository.SNMPRepository,
+	httpRepo repository.HTTPRepository,
 	cache cache.Cache,
 	wsHub *worker.WebSocketHub,
 	schedulerManager *scheduler.SchedulerManager,
@@ -127,6 +128,19 @@ func SetupRoutes(
 			snmp.POST("", snmpHandler.Create)
 			snmp.PATCH("/:id", snmpHandler.Update)
 			snmp.DELETE("/:id", snmpHandler.Delete)
+		}
+
+		// HTTP
+		koneksiRepo := repository.NewKoneksiRepository()
+		httpHandler := handlers.NewHTTPHandler(httpRepo, koneksiRepo, paramService, schedulerManager)
+		http := v1.Group("/http")
+		{
+			http.GET("", httpHandler.GetAll)
+			http.GET("/:id", httpHandler.GetByID)
+			http.POST("", httpHandler.Create)
+			http.POST("/test-fetch", httpHandler.TestFetch) // Test fetch endpoint
+			http.PATCH("/:id", httpHandler.Update)
+			http.DELETE("/:id", httpHandler.Delete)
 		}
 
 		// Real-time data
@@ -244,8 +258,8 @@ func SetupRoutes(
 		alarmHandler := handlers.NewAlarmHandler(alarmRepo)
 		alarms := v1.Group("/alarms")
 		{
-			alarms.GET("", alarmHandler.GetAll)                    // GET /api/v1/alarms (get all current alarms)
-			alarms.DELETE("/:id", alarmHandler.DeleteByID)         // DELETE /api/v1/alarms/:id (delete alarm by ID)
+			alarms.GET("", alarmHandler.GetAll)                                      // GET /api/v1/alarms (get all current alarms)
+			alarms.DELETE("/:id", alarmHandler.DeleteByID)                           // DELETE /api/v1/alarms/:id (delete alarm by ID)
 			alarms.DELETE("/workflow/:workflow_id", alarmHandler.DeleteByWorkflowID) // DELETE /api/v1/alarms/workflow/:workflow_id (delete alarm by workflow ID)
 		}
 
@@ -253,11 +267,11 @@ func SetupRoutes(
 		writeLogHandler := handlers.NewWriteLogHandler(writeLogRepo)
 		writeLogs := v1.Group("/write-logs")
 		{
-			writeLogs.GET("", writeLogHandler.GetAll)                                    // GET /api/v1/write-logs?limit=100
-			writeLogs.GET("/:id", writeLogHandler.GetByID)                               // GET /api/v1/write-logs/:id
-			writeLogs.GET("/parameter/:parameter_id", writeLogHandler.GetByParameterID)  // GET /api/v1/write-logs/parameter/:parameter_id?limit=50
-			writeLogs.GET("/workflow/:workflow_id", writeLogHandler.GetByWorkflowID)     // GET /api/v1/write-logs/workflow/:workflow_id?limit=50
-			writeLogs.GET("/date-range", writeLogHandler.GetByDateRange)                 // GET /api/v1/write-logs/date-range?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD&limit=100
+			writeLogs.GET("", writeLogHandler.GetAll)                                   // GET /api/v1/write-logs?limit=100
+			writeLogs.GET("/:id", writeLogHandler.GetByID)                              // GET /api/v1/write-logs/:id
+			writeLogs.GET("/parameter/:parameter_id", writeLogHandler.GetByParameterID) // GET /api/v1/write-logs/parameter/:parameter_id?limit=50
+			writeLogs.GET("/workflow/:workflow_id", writeLogHandler.GetByWorkflowID)    // GET /api/v1/write-logs/workflow/:workflow_id?limit=50
+			writeLogs.GET("/date-range", writeLogHandler.GetByDateRange)                // GET /api/v1/write-logs/date-range?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD&limit=100
 		}
 	}
 
