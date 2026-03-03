@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -177,6 +178,10 @@ func main() {
 		wsHub, // Pass WebSocketHub for broadcasting alarms
 	)
 
+	// Wire set-point service to workflow engine so workflows with
+	// SETPOINT_CHANGED triggers can be evaluated on set-point updates.
+	setPointService.SetWorkflowEngine(workflowEngine)
+
 	// Load all workflows from database
 	if err := workflowEngine.LoadAll(); err != nil {
 		log.Warnf("Failed to load workflows: %v", err)
@@ -326,8 +331,71 @@ func main() {
 func runMigrations() error {
 	db := database.GetDB()
 
+	// Migration 043: Drop FK constraint on current_alarm.parameter_id
+	// This allows alarms for set-point triggered workflows (parameter_id=0)
+	// Check if current_alarm table exists
+	var tableExists int
+	db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='current_alarm'").Scan(&tableExists)
+	migrationApplied := false
+	if tableExists > 0 {
+		// Check if FK constraint exists by checking sqlite_master for foreign key definition
+		var tableSQL string
+		db.Raw("SELECT sql FROM sqlite_master WHERE type='table' AND name='current_alarm'").Scan(&tableSQL)
+
+		if tableSQL != "" && tableSQL != "NULL" {
+			// Check if FK constraint on parameter_id exists
+			// GORM creates FK with format: FOREIGN KEY (ParameterID) REFERENCES parameter(id)
+			hasParameterFK := strings.Contains(strings.ToLower(tableSQL), "foreign key") &&
+				(strings.Contains(tableSQL, "ParameterID") || strings.Contains(strings.ToLower(tableSQL), "parameter_id")) &&
+				strings.Contains(strings.ToLower(tableSQL), "parameter")
+
+			if hasParameterFK {
+				logger.GetLogger().Info("Running migration 043: Removing FK constraint on current_alarm.parameter_id")
+				// Execute migration SQL to drop FK constraint
+				migrationSQL := `
+					PRAGMA foreign_keys=off;
+					BEGIN TRANSACTION;
+					CREATE TABLE IF NOT EXISTS current_alarm_new (
+						id INTEGER PRIMARY KEY AUTOINCREMENT,
+						workflow_id INTEGER NOT NULL,
+						workflow_name VARCHAR(100) NOT NULL,
+						parameter_id INTEGER NOT NULL,
+						parameter_name VARCHAR(100),
+						alarm_message TEXT NOT NULL,
+						triggered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+						created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+						updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+						FOREIGN KEY (workflow_id) REFERENCES workflow(id) ON DELETE CASCADE
+					);
+					INSERT INTO current_alarm_new (
+						id, workflow_id, workflow_name, parameter_id, parameter_name, 
+						alarm_message, triggered_at, created_at, updated_at
+					) SELECT 
+						id, workflow_id, workflow_name, parameter_id, parameter_name, 
+						alarm_message, triggered_at, created_at, updated_at
+					FROM current_alarm;
+					DROP TABLE current_alarm;
+					ALTER TABLE current_alarm_new RENAME TO current_alarm;
+					CREATE INDEX IF NOT EXISTS idx_current_alarm_workflow_id ON current_alarm(workflow_id);
+					CREATE INDEX IF NOT EXISTS idx_current_alarm_parameter_id ON current_alarm(parameter_id);
+					CREATE UNIQUE INDEX IF NOT EXISTS idx_current_alarm_workflow_unique ON current_alarm(workflow_id);
+					COMMIT;
+					PRAGMA foreign_keys=on;
+				`
+				if err := db.Exec(migrationSQL).Error; err != nil {
+					logger.GetLogger().Warnf("Migration 043 failed (may already be applied): %v", err)
+				} else {
+					logger.GetLogger().Info("Migration 043 completed successfully")
+					migrationApplied = true
+				}
+			}
+		}
+	}
+
 	// Auto-migrate all tables
-	if err := db.AutoMigrate(
+	// If migration 043 was just applied, skip CurrentAlarm to avoid GORM DDL comparison issues
+	// The table structure is already correct after migration
+	tablesToMigrate := []interface{}{
 		&domain.Koneksi{},
 		&domain.Parameter{},
 		&domain.ModbusRTU{},
@@ -347,13 +415,35 @@ func runMigrations() error {
 		&domain.WorkflowAction{},
 		&domain.Threshold{},
 		&domain.WorkflowState{},
-		&domain.CurrentAlarm{},
 		&domain.Bypass{},
 		&domain.BypassRule{},
 		&domain.BypassAction{},
 		&domain.IMCParameterConfig{},
-	); err != nil {
+	}
+
+	// Only add CurrentAlarm if migration 043 was not just applied
+	// If migration was applied, the table structure is already correct and we skip AutoMigrate
+	// to avoid GORM's DDL comparison issues with manually migrated tables
+	if !migrationApplied {
+		tablesToMigrate = append(tablesToMigrate, &domain.CurrentAlarm{})
+	}
+
+	if err := db.AutoMigrate(tablesToMigrate...); err != nil {
 		return err
+	}
+
+	// If migration was applied, verify table exists (it should, but check anyway)
+	if migrationApplied {
+		var count int
+		if err := db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='current_alarm'").Scan(&count).Error; err != nil {
+			logger.GetLogger().Warnf("Failed to verify current_alarm table after migration: %v", err)
+		} else if count == 0 {
+			// Table doesn't exist (shouldn't happen), create it with AutoMigrate
+			logger.GetLogger().Info("current_alarm table not found after migration, creating with AutoMigrate")
+			if err := db.AutoMigrate(&domain.CurrentAlarm{}); err != nil {
+				return fmt.Errorf("failed to create current_alarm table: %w", err)
+			}
+		}
 	}
 
 	return nil

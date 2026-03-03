@@ -28,7 +28,7 @@ func (r *alarmRepository) GetAll() ([]domain.CurrentAlarm, error) {
 	var alarms []domain.CurrentAlarm
 	err := database.GetDB().
 		Preload("Workflow").
-		Preload("Parameter").
+		// Parameter relation removed - no FK constraint, parameter_id can be 0 for set-point workflows
 		Order("triggered_at DESC").
 		Find(&alarms).Error
 	return alarms, err
@@ -39,7 +39,7 @@ func (r *alarmRepository) GetByWorkflowID(workflowID uint) (*domain.CurrentAlarm
 	err := database.GetDB().
 		Where("workflow_id = ?", workflowID).
 		Preload("Workflow").
-		Preload("Parameter").
+		// Parameter relation removed - no FK constraint, parameter_id can be 0 for set-point workflows
 		First(&alarm).Error
 	if err == gorm.ErrRecordNotFound {
 		return nil, nil

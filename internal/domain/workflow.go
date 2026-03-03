@@ -11,7 +11,7 @@ type Workflow struct {
 	Nama        string    `gorm:"size:100;not null" json:"nama"`
 	Description string    `gorm:"type:text" json:"description"`
 	Enabled     bool      `gorm:"default:1" json:"enabled"`
-	Version     int       `gorm:"default:1" json:"version"`     // 1 = flat, 2 = tree
+	Version     int       `gorm:"default:1" json:"version"`             // 1 = flat, 2 = tree
 	TreeData    *string   `gorm:"type:text" json:"tree_data,omitempty"` // JSON tree structure for version 2
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
@@ -109,8 +109,9 @@ type CurrentAlarm struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 
 	// Relations
-	Workflow  *Workflow  `gorm:"foreignKey:WorkflowID" json:"workflow,omitempty"`
-	Parameter *Parameter `gorm:"foreignKey:ParameterID" json:"parameter,omitempty"`
+	Workflow *Workflow `gorm:"foreignKey:WorkflowID" json:"workflow,omitempty"`
+	// Parameter relation removed FK constraint to allow parameter_id=0 for set-point triggered workflows
+	Parameter *Parameter `gorm:"-" json:"parameter,omitempty"`
 }
 
 // TableName specifies the table name for CurrentAlarm

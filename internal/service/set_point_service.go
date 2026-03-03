@@ -11,8 +11,9 @@ import (
 // SetPointService menangani logika bisnis untuk set-point.
 // Sesuai req.md: set-point hanya state, tidak write langsung ke device.
 type SetPointService struct {
-	repo         repository.SetPointRepository
-	bypassEngine *BypassEngine
+	repo           repository.SetPointRepository
+	bypassEngine   *BypassEngine
+	workflowEngine *WorkflowEngine
 }
 
 func NewSetPointService(repo repository.SetPointRepository) *SetPointService {
@@ -22,6 +23,12 @@ func NewSetPointService(repo repository.SetPointRepository) *SetPointService {
 // SetBypassEngine sets the bypass engine for triggering bypasses when set-point value changes
 func (s *SetPointService) SetBypassEngine(engine *BypassEngine) {
 	s.bypassEngine = engine
+}
+
+// SetWorkflowEngine wires the workflow engine so that workflows with
+// SETPOINT_CHANGED triggers can be evaluated when set-points change.
+func (s *SetPointService) SetWorkflowEngine(engine *WorkflowEngine) {
+	s.workflowEngine = engine
 }
 
 func (s *SetPointService) GetAll() ([]domain.SetPoint, error) {
@@ -59,12 +66,20 @@ func (s *SetPointService) Update(sp *domain.SetPoint) error {
 		return fmt.Errorf("failed to update set-point: %w", err)
 	}
 
-	// Trigger bypass engine if value changed
-	if oldSP.Value != sp.Value && s.bypassEngine != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := s.bypassEngine.OnSetPointChanged(ctx, sp.ID); err != nil {
-			// Silent fail
+	// Trigger engines if value changed
+	if oldSP.Value != sp.Value {
+		// Bypass engine (existing behavior)
+		if s.bypassEngine != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := s.bypassEngine.OnSetPointChanged(ctx, sp.ID); err != nil {
+				// Silent fail
+			}
+		}
+
+		// Workflow engine (new behavior for SETPOINT_CHANGED triggers)
+		if s.workflowEngine != nil {
+			s.workflowEngine.OnSetPointChanged(sp.ID)
 		}
 	}
 
@@ -96,10 +111,18 @@ func (s *SetPointService) UpdateValue(ctx context.Context, setPointID uint, newV
 		return fmt.Errorf("failed to update set-point: %w", err)
 	}
 
-	// Trigger bypass engine if value changed
-	if oldValue != newValue && s.bypassEngine != nil {
-		if err := s.bypassEngine.OnSetPointChanged(ctx, setPointID); err != nil {
-			// Silent fail
+	// Trigger engines if value changed
+	if oldValue != newValue {
+		// Bypass engine (existing behavior)
+		if s.bypassEngine != nil {
+			if err := s.bypassEngine.OnSetPointChanged(ctx, setPointID); err != nil {
+				// Silent fail
+			}
+		}
+
+		// Workflow engine (new behavior for SETPOINT_CHANGED triggers)
+		if s.workflowEngine != nil {
+			s.workflowEngine.OnSetPointChanged(setPointID)
 		}
 	}
 

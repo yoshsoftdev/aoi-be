@@ -181,9 +181,11 @@ func SetupRoutes(
 		// Set-Point
 		setPointRepo := repository.NewSetPointRepository()
 		setPointService := service.NewSetPointService(setPointRepo)
-		// Wire bypass engine to set-point service for triggering bypasses on value change
+		// Wire engines to set-point service so both bypass and workflow
+		// engines can react when set-point values change.
 		setPointService.SetBypassEngine(bypassEngine)
-		setPointHandler := handlers.NewSetPointHandler(setPointService)
+		setPointService.SetWorkflowEngine(workflowEngine)
+		setPointHandler := handlers.NewSetPointHandler(setPointService, workflowEngine)
 		setPoints := v1.Group("/set-points")
 		{
 			setPoints.GET("", setPointHandler.GetAll)

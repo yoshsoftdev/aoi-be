@@ -29,9 +29,12 @@ type WorkflowEngine struct {
 	wsBroadcaster            WebSocketBroadcaster      // For broadcasting alarm notifications
 	// eventBus     EventBus // TODO: Implement event bus for event actions
 
-	// In-memory registry: parameter_id -> workflows that monitor it
+	// In-memory registry:
+	// - parameter_id -> workflows that monitor parameter changes
+	// - setpoint_id  -> workflows that monitor set-point changes
 	mu               sync.RWMutex
 	workflowsByParam map[uint][]*domain.Workflow // parameterID -> list of workflows
+	workflowsBySetPt map[uint][]*domain.Workflow // setPointID -> list of workflows
 	debounceMap      map[uint]time.Time          // workflowID -> last execution time (for debounce)
 	debounceWindow   time.Duration               // Minimum time between executions
 }
@@ -57,6 +60,7 @@ func NewWorkflowEngine(
 		internalParameterService: internalParameterService,
 		wsBroadcaster:            wsBroadcaster,
 		workflowsByParam:         make(map[uint][]*domain.Workflow),
+		workflowsBySetPt:         make(map[uint][]*domain.Workflow),
 		debounceMap:              make(map[uint]time.Time),
 		debounceWindow:           5 * time.Second, // Default: 5 seconds debounce
 	}
@@ -69,6 +73,7 @@ func (e *WorkflowEngine) LoadAll() error {
 
 	// Clear existing registry
 	e.workflowsByParam = make(map[uint][]*domain.Workflow)
+	e.workflowsBySetPt = make(map[uint][]*domain.Workflow)
 	e.debounceMap = make(map[uint]time.Time)
 
 	// Load all enabled workflows
@@ -96,8 +101,15 @@ func (e *WorkflowEngine) LoadAll() error {
 		if workflow.Version == domain.WorkflowVersionTree && workflow.TreeData != nil {
 			var tree domain.WorkflowTree
 			if err := json.Unmarshal([]byte(*workflow.TreeData), &tree); err == nil {
-				if tree.Trigger != nil && tree.Trigger.Type == domain.TriggerTypeParameterChanged {
-					e.workflowsByParam[tree.Trigger.SourceID] = append(e.workflowsByParam[tree.Trigger.SourceID], workflow)
+				if tree.Trigger != nil {
+					switch tree.Trigger.Type {
+					case domain.TriggerTypeParameterChanged:
+						// Register workflows that monitor parameter changes
+						e.workflowsByParam[tree.Trigger.SourceID] = append(e.workflowsByParam[tree.Trigger.SourceID], workflow)
+					case domain.TriggerTypeSetpointChanged:
+						// Register workflows that monitor set-point changes
+						e.workflowsBySetPt[tree.Trigger.SourceID] = append(e.workflowsBySetPt[tree.Trigger.SourceID], workflow)
+					}
 				}
 			}
 		}
@@ -129,6 +141,61 @@ func (e *WorkflowEngine) OnParameterUpdated(parameterID uint, data *domain.Realt
 			// Version 1: Flat execution (backward compatibility)
 			if err := e.evaluateWorkflow(workflow, parameterID, data); err != nil {
 				// Silent fail
+			}
+		}
+	}
+}
+
+// OnSetPointChanged is called when a set-point value is updated.
+// It evaluates workflows whose trigger type is SETPOINT_CHANGED for the given setPointID.
+func (e *WorkflowEngine) OnSetPointChanged(setPointID uint) {
+	e.mu.RLock()
+	workflows := e.workflowsBySetPt[setPointID]
+	e.mu.RUnlock()
+
+	logger.GetLogger().Infof("[WF] OnSetPointChanged: setPointID=%d, registered_workflows=%d", setPointID, len(workflows))
+
+	// Fallback: if registry is empty (e.g., engine not reloaded correctly),
+	// scan all workflows and find those with SETPOINT_CHANGED trigger.
+	if len(workflows) == 0 {
+		all, err := e.workflowRepo.GetAll()
+		if err != nil {
+			logger.GetLogger().Warnf("[WF] OnSetPointChanged: failed to load workflows: %v", err)
+			return
+		}
+
+		for i := range all {
+			wf := &all[i]
+			if !wf.Enabled || wf.Version != domain.WorkflowVersionTree || wf.TreeData == nil {
+				continue
+			}
+
+			var tree domain.WorkflowTree
+			if err := json.Unmarshal([]byte(*wf.TreeData), &tree); err != nil || tree.Trigger == nil {
+				continue
+			}
+
+			if tree.Trigger.Type == domain.TriggerTypeSetpointChanged && tree.Trigger.SourceID == setPointID {
+				workflows = append(workflows, wf)
+			}
+		}
+
+		logger.GetLogger().Infof("[WF] OnSetPointChanged fallback: found_workflows=%d", len(workflows))
+	}
+
+	if len(workflows) == 0 {
+		return // No workflows monitor this set-point
+	}
+
+	// Evaluate each workflow (only version 2 tree-based workflows are supported for set-point triggers)
+	for _, workflow := range workflows {
+		if workflow.Version == domain.WorkflowVersionTree {
+			// For set-point triggered workflows, updatedParamID is not relevant,
+			// so we pass 0 and nil for data. evaluateTreeWorkflow will skip the
+			// parameterID check because the trigger type is SETPOINT_CHANGED.
+			if err := e.evaluateTreeWorkflow(workflow, 0, nil); err != nil {
+				logger.GetLogger().Warnf("[WF] OnSetPointChanged: evaluateTreeWorkflow failed for workflowID=%d: %v", workflow.ID, err)
+				continue
 			}
 		}
 	}
@@ -622,8 +689,13 @@ func (e *WorkflowEngine) evaluateTreeWorkflow(workflow *domain.Workflow, updated
 		state = nil
 	}
 
+	// Determine edge trigger behavior:
+	// - PARAMETER_CHANGED: use edge trigger (only false -> true transitions)
+	// - SETPOINT_CHANGED: execute every time condition is true
+	edgeTrigger := tree.Trigger.Type == domain.TriggerTypeParameterChanged
+
 	// Evaluate root node (recursive)
-	shouldExecute, conditionMet := e.evaluateTreeNode(tree.Root, state, 0)
+	shouldExecute, conditionMet := e.evaluateTreeNode(tree.Root, state, 0, edgeTrigger)
 
 	// Update state
 	newState := &domain.WorkflowState{
@@ -655,9 +727,11 @@ func (e *WorkflowEngine) evaluateTreeWorkflow(workflow *domain.Workflow, updated
 	return nil
 }
 
-// evaluateTreeNode evaluates a tree node recursively (for edge trigger detection)
+// evaluateTreeNode evaluates a tree node recursively.
 // Returns: (shouldExecute, conditionMet)
-func (e *WorkflowEngine) evaluateTreeNode(node *domain.TreeNode, state *domain.WorkflowState, depth int) (bool, bool) {
+// - shouldExecute: whether actions under this node should execute (based on edgeTrigger)
+// - conditionMet: whether any condition in this subtree is currently true
+func (e *WorkflowEngine) evaluateTreeNode(node *domain.TreeNode, state *domain.WorkflowState, depth int, edgeTrigger bool) (bool, bool) {
 	if depth > 10 { // Max depth safety
 		return false, false
 	}
@@ -679,11 +753,19 @@ func (e *WorkflowEngine) evaluateTreeNode(node *domain.TreeNode, state *domain.W
 		// Evaluate condition
 		conditionMet := e.evaluateTreeCondition(node.Condition)
 
-		// Check edge trigger: only execute if condition changes from false to true
+		// Determine whether to execute based on trigger mode
+		// - edgeTrigger=true  => only when condition changes false -> true
+		// - edgeTrigger=false => whenever condition is true
 		shouldExecute := false
 		if conditionMet {
-			if state == nil || state.LastConditionResult == nil || !*state.LastConditionResult {
+			if !edgeTrigger {
+				// For SETPOINT_CHANGED and other non-edge triggers, execute whenever condition is true
 				shouldExecute = true
+			} else {
+				// Edge trigger: only when previous result was false
+				if state == nil || state.LastConditionResult == nil || !*state.LastConditionResult {
+					shouldExecute = true
+				}
 			}
 		}
 
@@ -691,7 +773,7 @@ func (e *WorkflowEngine) evaluateTreeNode(node *domain.TreeNode, state *domain.W
 		if conditionMet {
 			// Evaluate THEN branch
 			for _, child := range node.Then {
-				childShouldExecute, childConditionMet := e.evaluateTreeNode(&child, state, depth+1)
+				childShouldExecute, childConditionMet := e.evaluateTreeNode(&child, state, depth+1, edgeTrigger)
 				if childShouldExecute {
 					shouldExecute = true
 				}
@@ -702,7 +784,7 @@ func (e *WorkflowEngine) evaluateTreeNode(node *domain.TreeNode, state *domain.W
 		} else {
 			// Evaluate ELSE branch
 			for _, child := range node.Else {
-				childShouldExecute, childConditionMet := e.evaluateTreeNode(&child, state, depth+1)
+				childShouldExecute, childConditionMet := e.evaluateTreeNode(&child, state, depth+1, edgeTrigger)
 				if childShouldExecute {
 					shouldExecute = true
 				}
@@ -741,17 +823,22 @@ func (e *WorkflowEngine) evaluateTreeCondition(condition *domain.Condition) bool
 	// Get left value
 	leftValue, err := e.getValueFromSource(condition.Left)
 	if err != nil {
+		logger.GetLogger().Warnf("[WF] evaluateTreeCondition: failed to get left value: %v", err)
 		return false
 	}
 
 	// Get right value
 	rightValue, err := e.getValueFromSource(condition.Right)
 	if err != nil {
+		logger.GetLogger().Warnf("[WF] evaluateTreeCondition: failed to get right value: %v", err)
 		return false
 	}
 
 	// Evaluate condition
-	return e.evaluateCondition(leftValue, condition.Operator, rightValue)
+	result := e.evaluateCondition(leftValue, condition.Operator, rightValue)
+	logger.GetLogger().Infof("[WF] evaluateTreeCondition: left=%.4f, op=%s, right=%.4f, result=%v",
+		leftValue, condition.Operator, rightValue, result)
+	return result
 }
 
 // getValueFromSource gets a value from a ValueSource (parameter, setpoint, or static)
@@ -791,8 +878,15 @@ func (e *WorkflowEngine) getValueFromSource(source *domain.ValueSource) (float64
 		return 0, fmt.Errorf("parameter %d value is not a number", *source.SourceID)
 
 	case "setpoint":
-		// TODO: Implement setpoint value retrieval
-		return 0, fmt.Errorf("setpoint value source not yet implemented")
+		if source.SourceID == nil {
+			return 0, fmt.Errorf("setpoint source_id is nil")
+		}
+		// Retrieve set-point value from repository
+		sp, err := e.setPointRepo.GetByID(*source.SourceID)
+		if err != nil {
+			return 0, fmt.Errorf("setpoint %d not found: %w", *source.SourceID, err)
+		}
+		return sp.Value, nil
 
 	default:
 		return 0, fmt.Errorf("unknown value source type: %s", source.Type)
@@ -895,6 +989,7 @@ func (e *WorkflowEngine) executeTreeAction(workflowID uint, workflow *domain.Wor
 
 	switch node.ActionType {
 	case domain.ActionTypeAlarmNotification:
+		logger.GetLogger().Infof("[WF] executeTreeAction: workflowID=%d, type=ALARM_NOTIFICATION, actionData=%v", workflowID, node.ActionData)
 		// Extract alarm data
 		title, _ := node.ActionData["title"].(string)
 		message, _ := node.ActionData["message"].(string)
@@ -937,12 +1032,16 @@ func (e *WorkflowEngine) executeTreeAction(workflowID uint, workflow *domain.Wor
 		}
 
 		if err := e.alarmRepo.CreateOrUpdate(alarm); err != nil {
+			logger.GetLogger().Errorf("[WF] executeTreeAction: failed to save alarm for workflowID=%d: %v", workflowID, err)
 			return fmt.Errorf("failed to save alarm: %w", err)
 		}
 
 		// Broadcast alarm notification via WebSocket
 		if e.wsBroadcaster != nil {
+			logger.GetLogger().Infof("[WF] executeTreeAction: broadcasting alarm via WebSocket for workflowID=%d", workflowID)
 			e.wsBroadcaster.BroadcastAlarm(workflowID, workflow.Nama, message)
+		} else {
+			logger.GetLogger().Warnf("[WF] executeTreeAction: wsBroadcaster is nil, skipping WebSocket broadcast")
 		}
 
 		// Send alarm to external HTTP endpoint

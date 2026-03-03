@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"aoi-backend/internal/core/logger"
 	"aoi-backend/internal/domain"
 	"aoi-backend/internal/service"
 	"net/http"
@@ -10,11 +11,15 @@ import (
 )
 
 type SetPointHandler struct {
-	svc *service.SetPointService
+	svc            *service.SetPointService
+	workflowEngine *service.WorkflowEngine
 }
 
-func NewSetPointHandler(svc *service.SetPointService) *SetPointHandler {
-	return &SetPointHandler{svc: svc}
+func NewSetPointHandler(svc *service.SetPointService, engine *service.WorkflowEngine) *SetPointHandler {
+	return &SetPointHandler{
+		svc:            svc,
+		workflowEngine: engine,
+	}
 }
 
 // GetAll returns all set-points.
@@ -107,13 +112,13 @@ func (h *SetPointHandler) Create(c *gin.Context) {
 }
 
 type updateSetPointRequest struct {
-	Name        *string   `json:"name"`
-	Unit        *string   `json:"unit"`
-	Value       *float64  `json:"value"`
-	DataType    *string   `json:"data_type"`
-	MinValue    *float64  `json:"min_value"`
-	MaxValue    *float64  `json:"max_value"`
-	Description *string   `json:"description"`
+	Name        *string  `json:"name"`
+	Unit        *string  `json:"unit"`
+	Value       *float64 `json:"value"`
+	DataType    *string  `json:"data_type"`
+	MinValue    *float64 `json:"min_value"`
+	MaxValue    *float64 `json:"max_value"`
+	Description *string  `json:"description"`
 }
 
 func (h *SetPointHandler) Update(c *gin.Context) {
@@ -145,6 +150,9 @@ func (h *SetPointHandler) Update(c *gin.Context) {
 		return
 	}
 
+	// Log incoming update for debugging
+	logger.GetLogger().Infof("[SETPOINT] Update request: id=%d, old_value=%f, new_value_ptr=%v", id, existing.Value, req.Value)
+
 	// Update only fields that are provided
 	item := &domain.SetPoint{
 		ID:          uint(id),
@@ -163,8 +171,12 @@ func (h *SetPointHandler) Update(c *gin.Context) {
 	if req.Unit != nil {
 		item.Unit = req.Unit
 	}
+	valueChanged := false
 	if req.Value != nil {
 		item.Value = *req.Value
+		if *req.Value != existing.Value {
+			valueChanged = true
+		}
 	}
 	if req.DataType != nil {
 		item.DataType = *req.DataType
@@ -185,6 +197,12 @@ func (h *SetPointHandler) Update(c *gin.Context) {
 			"error":   err.Error(),
 		})
 		return
+	}
+
+	// Explicitly trigger workflow engine for SETPOINT_CHANGED workflows
+	if valueChanged && h.workflowEngine != nil {
+		logger.GetLogger().Infof("[SETPOINT] Value changed for id=%d, triggering workflows", item.ID)
+		h.workflowEngine.OnSetPointChanged(item.ID)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -213,4 +231,3 @@ func (h *SetPointHandler) Delete(c *gin.Context) {
 		"message": "set-point deleted",
 	})
 }
-
