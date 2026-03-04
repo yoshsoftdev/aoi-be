@@ -754,19 +754,40 @@ func (e *WorkflowEngine) evaluateTreeNode(node *domain.TreeNode, state *domain.W
 		conditionMet := e.evaluateTreeCondition(node.Condition)
 
 		// Determine whether to execute based on trigger mode
-		// - edgeTrigger=true  => only when condition changes false -> true
-		// - edgeTrigger=false => whenever condition is true
+		// - edgeTrigger=true  =>
+		//     * THEN branch: when condition changes false -> true
+		//     * ELSE branch: when condition changes true -> false
+		//   (so actions in ELSE can run once ketika keluar dari kondisi)
+		// - edgeTrigger=false =>
+		//     * Selalu evaluasi dan eksekusi node IF pada setiap trigger,
+		//       baik THEN maupun ELSE (mis. untuk SETPOINT_CHANGED / time_window)
 		shouldExecute := false
-		if conditionMet {
-			if !edgeTrigger {
-				// For SETPOINT_CHANGED and other non-edge triggers, execute whenever condition is true
-				shouldExecute = true
+		if edgeTrigger {
+			// Edge-triggered workflows (PARAMETER_CHANGED)
+			// Baca hasil kondisi sebelumnya dari state (global per workflow)
+			var last bool
+			var hasLast bool
+			if state != nil && state.LastConditionResult != nil {
+				last = *state.LastConditionResult
+				hasLast = true
+			}
+
+			if conditionMet {
+				// Transisi FALSE -> TRUE  => jalankan THEN
+				if !hasLast || !last {
+					shouldExecute = true
+				}
 			} else {
-				// Edge trigger: only when previous result was false
-				if state == nil || state.LastConditionResult == nil || !*state.LastConditionResult {
+				// Transisi TRUE -> FALSE => jalankan ELSE
+				if hasLast && last {
 					shouldExecute = true
 				}
 			}
+		} else {
+			// Non edge-triggered workflows (mis. SETPOINT_CHANGED)
+			// Selalu eksekusi node IF pada setiap trigger, sehingga
+			// THEN dan ELSE akan berjalan sesuai nilai kondisi saat ini.
+			shouldExecute = true
 		}
 
 		// Recursively evaluate children
