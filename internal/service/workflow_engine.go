@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"aoi-backend/internal/core/cache"
-	"aoi-backend/internal/core/logger"
 	"aoi-backend/internal/domain"
 	"aoi-backend/internal/repository"
 )
@@ -153,14 +152,12 @@ func (e *WorkflowEngine) OnSetPointChanged(setPointID uint) {
 	workflows := e.workflowsBySetPt[setPointID]
 	e.mu.RUnlock()
 
-	logger.GetLogger().Infof("[WF] OnSetPointChanged: setPointID=%d, registered_workflows=%d", setPointID, len(workflows))
-
 	// Fallback: if registry is empty (e.g., engine not reloaded correctly),
 	// scan all workflows and find those with SETPOINT_CHANGED trigger.
 	if len(workflows) == 0 {
 		all, err := e.workflowRepo.GetAll()
 		if err != nil {
-			logger.GetLogger().Warnf("[WF] OnSetPointChanged: failed to load workflows: %v", err)
+			// Silent fail on fallback scan
 			return
 		}
 
@@ -180,7 +177,7 @@ func (e *WorkflowEngine) OnSetPointChanged(setPointID uint) {
 			}
 		}
 
-		logger.GetLogger().Infof("[WF] OnSetPointChanged fallback: found_workflows=%d", len(workflows))
+		// Fallback result is used silently (no logging)
 	}
 
 	if len(workflows) == 0 {
@@ -193,10 +190,8 @@ func (e *WorkflowEngine) OnSetPointChanged(setPointID uint) {
 			// For set-point triggered workflows, updatedParamID is not relevant,
 			// so we pass 0 and nil for data. evaluateTreeWorkflow will skip the
 			// parameterID check because the trigger type is SETPOINT_CHANGED.
-			if err := e.evaluateTreeWorkflow(workflow, 0, nil); err != nil {
-				logger.GetLogger().Warnf("[WF] OnSetPointChanged: evaluateTreeWorkflow failed for workflowID=%d: %v", workflow.ID, err)
-				continue
-			}
+			// Silent fail on evaluation errors for set-point workflows
+			_ = e.evaluateTreeWorkflow(workflow, 0, nil)
 		}
 	}
 }
@@ -607,8 +602,6 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 // sendAlarmToHTTPEndpoint sends alarm message to external HTTP endpoint
 // This runs in a goroutine to avoid blocking workflow execution
 func (e *WorkflowEngine) sendAlarmToHTTPEndpoint(message string, workflowID uint, workflowName string) {
-	log := logger.GetLogger()
-
 	// HTTP endpoint URL (can be moved to config later)
 	endpointURL := "http://localhost:8085/send"
 
@@ -619,7 +612,7 @@ func (e *WorkflowEngine) sendAlarmToHTTPEndpoint(message string, workflowID uint
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
-		log.Errorf("WorkflowEngine: Failed to marshal alarm payload: %v", err)
+		// Silent fail on marshal error
 		return
 	}
 
@@ -629,7 +622,7 @@ func (e *WorkflowEngine) sendAlarmToHTTPEndpoint(message string, workflowID uint
 
 	req, err := http.NewRequestWithContext(ctx, "POST", endpointURL, bytes.NewBuffer(jsonData))
 	if err != nil {
-		log.Errorf("WorkflowEngine: Failed to create HTTP request for alarm: %v", err)
+		// Silent fail on request creation
 		return
 	}
 
@@ -642,16 +635,11 @@ func (e *WorkflowEngine) sendAlarmToHTTPEndpoint(message string, workflowID uint
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Errorf("WorkflowEngine: Failed to send alarm to HTTP endpoint %s: %v", endpointURL, err)
+		// Silent fail on HTTP error
 		return
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		log.Infof("WorkflowEngine: Alarm sent to HTTP endpoint successfully: workflow=%d (%s), status=%d", workflowID, workflowName, resp.StatusCode)
-	} else {
-		log.Warnf("WorkflowEngine: Alarm sent to HTTP endpoint but received non-2xx status: workflow=%d (%s), status=%d", workflowID, workflowName, resp.StatusCode)
-	}
+	// Status code is ignored; failures are silent
 }
 
 // evaluateTreeWorkflow evaluates a version 2 tree-based workflow
@@ -844,21 +832,19 @@ func (e *WorkflowEngine) evaluateTreeCondition(condition *domain.Condition) bool
 	// Get left value
 	leftValue, err := e.getValueFromSource(condition.Left)
 	if err != nil {
-		logger.GetLogger().Warnf("[WF] evaluateTreeCondition: failed to get left value: %v", err)
+		// Silent fail on left value error
 		return false
 	}
 
 	// Get right value
 	rightValue, err := e.getValueFromSource(condition.Right)
 	if err != nil {
-		logger.GetLogger().Warnf("[WF] evaluateTreeCondition: failed to get right value: %v", err)
+		// Silent fail on right value error
 		return false
 	}
 
 	// Evaluate condition
 	result := e.evaluateCondition(leftValue, condition.Operator, rightValue)
-	logger.GetLogger().Infof("[WF] evaluateTreeCondition: left=%.4f, op=%s, right=%.4f, result=%v",
-		leftValue, condition.Operator, rightValue, result)
 	return result
 }
 
@@ -1010,7 +996,6 @@ func (e *WorkflowEngine) executeTreeAction(workflowID uint, workflow *domain.Wor
 
 	switch node.ActionType {
 	case domain.ActionTypeAlarmNotification:
-		logger.GetLogger().Infof("[WF] executeTreeAction: workflowID=%d, type=ALARM_NOTIFICATION, actionData=%v", workflowID, node.ActionData)
 		// Extract alarm data
 		title, _ := node.ActionData["title"].(string)
 		message, _ := node.ActionData["message"].(string)
@@ -1053,16 +1038,13 @@ func (e *WorkflowEngine) executeTreeAction(workflowID uint, workflow *domain.Wor
 		}
 
 		if err := e.alarmRepo.CreateOrUpdate(alarm); err != nil {
-			logger.GetLogger().Errorf("[WF] executeTreeAction: failed to save alarm for workflowID=%d: %v", workflowID, err)
+			// Propagate error without additional workflow logging
 			return fmt.Errorf("failed to save alarm: %w", err)
 		}
 
 		// Broadcast alarm notification via WebSocket
 		if e.wsBroadcaster != nil {
-			logger.GetLogger().Infof("[WF] executeTreeAction: broadcasting alarm via WebSocket for workflowID=%d", workflowID)
 			e.wsBroadcaster.BroadcastAlarm(workflowID, workflow.Nama, message)
-		} else {
-			logger.GetLogger().Warnf("[WF] executeTreeAction: wsBroadcaster is nil, skipping WebSocket broadcast")
 		}
 
 		// Send alarm to external HTTP endpoint

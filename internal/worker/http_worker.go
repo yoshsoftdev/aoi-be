@@ -219,7 +219,8 @@ func (w *HTTPWorker) Execute(ctx context.Context, configID uint) error {
 		}
 	}
 
-	logger.GetLogger().Infof("HTTP parameter %s (%d) updated: value=%.2f", param.Nama, config.IDParameter, processedValue)
+	// Previously logged every HTTP parameter update here; removed to reduce log noise.
+	// logger.GetLogger().Infof("HTTP parameter %s (%d) updated: value=%.2f", param.Nama, config.IDParameter, processedValue)
 
 	return nil
 }

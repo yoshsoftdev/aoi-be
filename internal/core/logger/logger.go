@@ -2,6 +2,7 @@ package logger
 
 import (
 	"aoi-backend/internal/core/config"
+	"io"
 	"os"
 
 	"github.com/sirupsen/logrus"
@@ -13,7 +14,7 @@ func Init() {
 	Log = logrus.New()
 	cfg := config.Get()
 
-	// Set output to stdout (terminal) explicitly
+	// By default, arahkan output ke stdout
 	Log.SetOutput(os.Stdout)
 
 	// Set log level - default to Debug for development, Info for production
@@ -26,7 +27,13 @@ func Init() {
 			level = logrus.InfoLevel
 		}
 	}
-	Log.SetLevel(level)
+	// Jika level diset ke "silent" di config, matikan semua log
+	if cfg.Log.Level == "silent" {
+		Log.SetOutput(io.Discard)
+		Log.SetLevel(logrus.PanicLevel)
+	} else {
+		Log.SetLevel(level)
+	}
 
 	// Set log format - default to text format for better readability in terminal
 	if cfg.Log.Format == "json" {
