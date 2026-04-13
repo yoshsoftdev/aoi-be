@@ -108,7 +108,8 @@ func main() {
 
 	// Initialize Threshold Service (needed for Formula Engine)
 	thresholdRepo := repository.NewThresholdRepository()
-	thresholdService := service.NewThresholdService(thresholdRepo)
+	thresholdLogRepo := repository.NewThresholdLogRepository()
+	thresholdService := service.NewThresholdService(thresholdRepo, thresholdLogRepo)
 	log.Info("Threshold service initialized")
 
 	// Initialize Formula Engine
@@ -181,6 +182,7 @@ func main() {
 	// Wire set-point service to workflow engine so workflows with
 	// SETPOINT_CHANGED triggers can be evaluated on set-point updates.
 	setPointService.SetWorkflowEngine(workflowEngine)
+	workflowEngine.SetSetPointService(setPointService)
 
 	// Load all workflows from database
 	if err := workflowEngine.LoadAll(); err != nil {
@@ -414,6 +416,7 @@ func runMigrations() error {
 		&domain.WorkflowCondition{},
 		&domain.WorkflowAction{},
 		&domain.Threshold{},
+		&domain.ThresholdLog{},
 		&domain.WorkflowState{},
 		&domain.Bypass{},
 		&domain.BypassRule{},

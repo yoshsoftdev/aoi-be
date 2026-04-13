@@ -692,6 +692,12 @@ func validateTreeNode(node *domain.TreeNode, depth int, maxDepth int, visited ma
 			if _, ok := node.ActionData["target_id"]; !ok {
 				return fmt.Errorf("write_dynamic action requires 'target_id' in action_data")
 			}
+			// target_type is optional (default: parameter), but if present it must be valid.
+			if targetTypeRaw, ok := node.ActionData["target_type"]; ok {
+				if targetType, ok := targetTypeRaw.(string); !ok || (targetType != "parameter" && targetType != "setpoint") {
+					return fmt.Errorf("write_dynamic action has invalid 'target_type' (must be 'parameter' or 'setpoint')")
+				}
+			}
 			// Value can come from either static value or setpoint
 			valueSource, hasValueSource := node.ActionData["value_source"]
 			if hasValueSource && valueSource == "setpoint" {

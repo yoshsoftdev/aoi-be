@@ -1,11 +1,9 @@
 package service
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"sync"
 	"time"
 
@@ -24,6 +22,7 @@ type WorkflowEngine struct {
 	setPointRepo             repository.SetPointRepository // For getting setpoint values
 	cache                    cache.Cache
 	writeService             *WriteService
+	setPointService          *SetPointService          // For writing set-point values from workflow actions
 	internalParameterService *InternalParameterService // For managing internal parameters
 	wsBroadcaster            WebSocketBroadcaster      // For broadcasting alarm notifications
 	// eventBus     EventBus // TODO: Implement event bus for event actions
@@ -63,6 +62,11 @@ func NewWorkflowEngine(
 		debounceMap:              make(map[uint]time.Time),
 		debounceWindow:           5 * time.Second, // Default: 5 seconds debounce
 	}
+}
+
+// SetSetPointService wires set-point service for write_dynamic actions that target set-points.
+func (e *WorkflowEngine) SetSetPointService(svc *SetPointService) {
+	e.setPointService = svc
 }
 
 // LoadAll loads all enabled workflows from database and builds the registry
@@ -561,7 +565,7 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 		}
 
 		// Send alarm to external HTTP endpoint
-		go e.sendAlarmToHTTPEndpoint(*action.AlarmMessage, workflowID, workflowName)
+		go e.sendAlarmToHTTPEndpoint(*action.AlarmMessage)
 
 	case "WRITE_INTERNAL":
 		// WRITE_INTERNAL: write to internal parameter (for workflow chaining)
@@ -601,45 +605,8 @@ func (e *WorkflowEngine) executeAction(workflowID uint, workflow *domain.Workflo
 
 // sendAlarmToHTTPEndpoint sends alarm message to external HTTP endpoint
 // This runs in a goroutine to avoid blocking workflow execution
-func (e *WorkflowEngine) sendAlarmToHTTPEndpoint(message string, workflowID uint, workflowName string) {
-	// HTTP endpoint URL (can be moved to config later)
-	endpointURL := "http://localhost:8085/send"
-
-	// Prepare request payload
-	payload := map[string]string{
-		"message": message,
-	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		// Silent fail on marshal error
-		return
-	}
-
-	// Create HTTP request with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", endpointURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		// Silent fail on request creation
-		return
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	// Send request
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		// Silent fail on HTTP error
-		return
-	}
-	defer resp.Body.Close()
-	// Status code is ignored; failures are silent
+func (e *WorkflowEngine) sendAlarmToHTTPEndpoint(message string) {
+	sendAlarmMessageToHTTPEndpoint(message)
 }
 
 // evaluateTreeWorkflow evaluates a version 2 tree-based workflow
@@ -1048,7 +1015,7 @@ func (e *WorkflowEngine) executeTreeAction(workflowID uint, workflow *domain.Wor
 		}
 
 		// Send alarm to external HTTP endpoint
-		go e.sendAlarmToHTTPEndpoint(message, workflowID, workflow.Nama)
+		go e.sendAlarmToHTTPEndpoint(message)
 
 		return nil
 
@@ -1059,7 +1026,7 @@ func (e *WorkflowEngine) executeTreeAction(workflowID uint, workflow *domain.Wor
 			return fmt.Errorf("write_dynamic action missing target_id")
 		}
 
-		targetParamID := uint(targetID)
+		targetIDUint := uint(targetID)
 		ctx := context.Background()
 
 		// Determine value source: static value or setpoint
@@ -1093,8 +1060,34 @@ func (e *WorkflowEngine) executeTreeAction(workflowID uint, workflow *domain.Wor
 			valuePtr = &value
 		}
 
-		// Use MANUAL mode (same as /write/execute endpoint)
-		// MANUAL mode supports both Value (scalar) and RegisterValues (raw)
+		targetType, _ := node.ActionData["target_type"].(string)
+		if targetType == "" {
+			targetType = "parameter" // backward-compatible default
+		}
+
+		if targetType == "setpoint" {
+			if e.setPointService != nil {
+				if err := e.setPointService.UpdateValue(ctx, targetIDUint, *valuePtr); err != nil {
+					return fmt.Errorf("failed to write set-point %d: %w", targetIDUint, err)
+				}
+				return nil
+			}
+
+			// Fallback path if SetPointService is not wired:
+			// update set-point directly then trigger set-point workflows.
+			sp, err := e.setPointRepo.GetByID(targetIDUint)
+			if err != nil {
+				return fmt.Errorf("failed to get set-point %d: %w", targetIDUint, err)
+			}
+			sp.Value = *valuePtr
+			if err := e.setPointRepo.Update(sp); err != nil {
+				return fmt.Errorf("failed to update set-point %d: %w", targetIDUint, err)
+			}
+			e.OnSetPointChanged(targetIDUint)
+			return nil
+		}
+
+		// Default target: parameter write (existing behavior)
 		writeReq := WriteRequest{
 			Mode:         "MANUAL",
 			Value:        valuePtr,
@@ -1102,7 +1095,7 @@ func (e *WorkflowEngine) executeTreeAction(workflowID uint, workflow *domain.Wor
 			WorkflowNama: &workflow.Nama,
 		}
 
-		result, err := e.writeService.Write(ctx, targetParamID, writeReq)
+		result, err := e.writeService.Write(ctx, targetIDUint, writeReq)
 		if err != nil {
 			return fmt.Errorf("write service error: %w", err)
 		}

@@ -1,22 +1,31 @@
 package service
 
 import (
+	"errors"
+	"fmt"
 	"strconv"
+	"time"
 
 	"aoi-backend/internal/core/logger"
 	"aoi-backend/internal/domain"
 	"aoi-backend/internal/repository"
+	"gorm.io/gorm"
 )
 
 // ThresholdService handles threshold and alarm status calculation
 type ThresholdService struct {
 	thresholdRepo repository.ThresholdRepository
+	thresholdLogRepo repository.ThresholdLogRepository
 }
 
 // NewThresholdService creates a new ThresholdService
-func NewThresholdService(thresholdRepo repository.ThresholdRepository) *ThresholdService {
+func NewThresholdService(
+	thresholdRepo repository.ThresholdRepository,
+	thresholdLogRepo repository.ThresholdLogRepository,
+) *ThresholdService {
 	return &ThresholdService{
 		thresholdRepo: thresholdRepo,
+		thresholdLogRepo: thresholdLogRepo,
 	}
 }
 
@@ -180,4 +189,81 @@ func (s *ThresholdService) ApplyThreshold(data *domain.RealtimeData) {
 
 	// Calculate alarm status
 	data.AlarmStatus = s.CalculateAlarmStatus(data.ParameterID, value)
+
+	if s.thresholdLogRepo == nil {
+		return
+	}
+
+	// Rule:
+	// - Non-normal: create log only once while unresolved entry exists.
+	// - Back to normal: fill resolve_at on unresolved entry.
+	if data.AlarmStatus != domain.AlarmStatusNormal {
+		openLog, err := s.thresholdLogRepo.GetOpenByParameterID(data.ParameterID)
+		if err == nil && openLog != nil {
+			// still breaching and unresolved exists -> do not create duplicate
+			return
+		}
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			logger.GetLogger().Warnf("ThresholdService: failed to query open threshold_log for parameter %d: %v", data.ParameterID, err)
+			return
+		}
+
+		threshold, err := s.thresholdRepo.GetByParameterID(data.ParameterID)
+		if err == nil && threshold != nil {
+			thresholdID := threshold.ID
+			now := time.Now()
+			message := formatThresholdTriggerMessage(data, value)
+			thresholdLog := &domain.ThresholdLog{
+				ParameterID:   data.ParameterID,
+				ThresholdID:   &thresholdID,
+				ThresholdType: threshold.ThresholdType,
+				Value:         value,
+				AlarmStatus:   data.AlarmStatus,
+				Message:       message,
+				TriggerAt:     now,
+			}
+			if err := s.thresholdLogRepo.Create(thresholdLog); err != nil {
+				logger.GetLogger().Warnf("ThresholdService: failed to create threshold_log for parameter %d: %v", data.ParameterID, err)
+				return
+			}
+
+			go sendAlarmMessageToHTTPEndpoint(message)
+		}
+		return
+	}
+
+	// Normal: close unresolved log if any.
+	openLog, err := s.thresholdLogRepo.GetOpenByParameterID(data.ParameterID)
+	if err == nil && openLog != nil {
+		if err := s.thresholdLogRepo.SetResolveAt(openLog.ID, time.Now()); err != nil {
+			logger.GetLogger().Warnf("ThresholdService: failed to set resolve_at for threshold_log id=%d: %v", openLog.ID, err)
+		}
+		return
+	}
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		logger.GetLogger().Warnf("ThresholdService: failed to query open threshold_log for resolve parameter %d: %v", data.ParameterID, err)
+	}
+}
+
+func formatThresholdTriggerMessage(data *domain.RealtimeData, value float64) string {
+	var statusText string
+	switch data.AlarmStatus {
+	case domain.AlarmStatusCriticalHigh:
+		statusText = "sudah diatas ambang batas"
+	case domain.AlarmStatusCriticalLow:
+		statusText = "sudah dibawah ambang batas"
+	default:
+		statusText = "Tidak normal"
+	}
+
+	return fmt.Sprintf(
+		"Pemberitahuan Sistem\n\n"+
+			"Terdapat kondisi %s pada sistem.\n"+
+			"Parameter pemantauan: %s\n"+
+			"Nilai saat ini: %v\n\n"+
+			"Pesan ini dikirim otomatis oleh sistem.",
+		statusText,
+		data.ParameterNama,
+		value,
+	)
 }

@@ -41,14 +41,21 @@ func (h *ParameterHandler) GetAll(c *gin.Context) {
 		return
 	}
 
-	// Debug: log the number of parameters retrieved
-	fmt.Printf("GetAll: Retrieved %d parameters\n", len(params))
+	// Hide SOURCE (raw/internal) parameters from public GET /parameters response.
+	// SOURCE parameters are internal for pipeline/formula dependencies.
+	filtered := make([]domain.Parameter, 0, len(params))
+	for _, p := range params {
+		if p.ParameterMode == domain.ParameterModeSOURCE {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"data":    params,
+		"data":    filtered,
 		"meta": gin.H{
-			"total": len(params),
+			"total": len(filtered),
 		},
 	})
 }

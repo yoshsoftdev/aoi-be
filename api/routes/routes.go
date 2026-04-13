@@ -256,6 +256,14 @@ func SetupRoutes(
 			threshold.DELETE("/:parameter_id", thresholdHandler.Delete)        // DELETE /api/v1/tracehold/:parameter_id (delete by parameter ID)
 		}
 
+		// Threshold Logs
+		thresholdLogRepo := repository.NewThresholdLogRepository()
+		thresholdLogHandler := handlers.NewThresholdLogHandler(thresholdLogRepo)
+		thresholdLogs := v1.Group("/threshold-logs")
+		{
+			thresholdLogs.GET("/parameter/:parameter_id", thresholdLogHandler.GetByParameterID) // GET /api/v1/threshold-logs/parameter/:parameter_id?limit=20
+		}
+
 		// Current Alarms
 		alarmHandler := handlers.NewAlarmHandler(alarmRepo)
 		alarms := v1.Group("/alarms")
