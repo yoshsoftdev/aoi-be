@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -793,6 +794,22 @@ func (e *WorkflowEngine) evaluateTreeCondition(condition *domain.Condition) bool
 			return false
 		}
 		return result
+	}
+
+	if condition.Type == "parameter_status" {
+		if condition.ParameterStatus == nil || condition.ParameterStatus.SourceID == 0 {
+			return false
+		}
+
+		cleanCacheKey := fmt.Sprintf("parameter:clean:%d", condition.ParameterStatus.SourceID)
+		var paramData *domain.RealtimeData
+		if err := e.cache.Get(cleanCacheKey, &paramData); err != nil || paramData == nil {
+			return false
+		}
+
+		expectedStatus := strings.ToLower(strings.TrimSpace(condition.ParameterStatus.Status))
+		currentStatus := strings.ToLower(strings.TrimSpace(paramData.Status))
+		return currentStatus == expectedStatus
 	}
 
 	// Default: parameter/setpoint comparison condition

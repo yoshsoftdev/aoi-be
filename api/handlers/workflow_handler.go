@@ -550,6 +550,17 @@ func validateTreeNode(node *domain.TreeNode, depth int, maxDepth int, visited ma
 					}
 				}
 			}
+		} else if conditionType == "parameter_status" {
+			if node.Condition.ParameterStatus == nil {
+				return fmt.Errorf("parameter_status condition requires parameter_status config")
+			}
+			if node.Condition.ParameterStatus.SourceID == 0 {
+				return fmt.Errorf("parameter_status source_id is required")
+			}
+			status := strings.ToLower(strings.TrimSpace(node.Condition.ParameterStatus.Status))
+			if status != "online" && status != "offline" {
+				return fmt.Errorf("parameter_status status must be 'online' or 'offline'")
+			}
 		} else {
 			// Validate comparison condition (default)
 			if node.Condition.Left == nil {
