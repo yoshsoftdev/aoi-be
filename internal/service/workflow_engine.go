@@ -14,6 +14,7 @@ import (
 )
 
 const workflowExecutionMaxDepth = 20
+const startTriggerInterval = 1 * time.Second
 
 // WorkflowEngine manages workflow evaluation and execution
 // Workflow hanya bekerja pada parameter_id, tidak tahu register/slave/address
@@ -38,6 +39,8 @@ type WorkflowEngine struct {
 	workflowsBySetPt map[uint][]*domain.Workflow // setPointID -> list of workflows
 	debounceMap      map[uint]time.Time          // workflowID -> last execution time (for debounce)
 	debounceWindow   time.Duration               // Minimum time between executions
+	workflowRunning  map[uint]bool               // workflowID -> true while executing
+	startLoopStops   map[uint]chan struct{}      // workflowID -> stop signal for START loop
 }
 
 // NewWorkflowEngine creates a new WorkflowEngine instance
@@ -64,6 +67,8 @@ func NewWorkflowEngine(
 		workflowsBySetPt:         make(map[uint][]*domain.Workflow),
 		debounceMap:              make(map[uint]time.Time),
 		debounceWindow:           5 * time.Second, // Default: 5 seconds debounce
+		workflowRunning:          make(map[uint]bool),
+		startLoopStops:           make(map[uint]chan struct{}),
 	}
 }
 
@@ -72,21 +77,69 @@ func (e *WorkflowEngine) SetSetPointService(svc *SetPointService) {
 	e.setPointService = svc
 }
 
+// runWorkflowIfIdle executes one workflow only if the same workflow is not running.
+func (e *WorkflowEngine) runWorkflowIfIdle(workflowID uint, runner func() error) {
+	e.mu.Lock()
+	if e.workflowRunning[workflowID] {
+		e.mu.Unlock()
+		return
+	}
+	e.workflowRunning[workflowID] = true
+	e.mu.Unlock()
+
+	defer func() {
+		e.mu.Lock()
+		delete(e.workflowRunning, workflowID)
+		e.mu.Unlock()
+	}()
+
+	_ = runner() // keep silent-fail behavior
+}
+
+// runStartTriggerLoop keeps START workflow running continuously with non-overlap semantics.
+func (e *WorkflowEngine) runStartTriggerLoop(workflow *domain.Workflow, stopCh <-chan struct{}) {
+	ticker := time.NewTicker(startTriggerInterval)
+	defer ticker.Stop()
+
+	for {
+		e.runWorkflowIfIdle(workflow.ID, func() error {
+			return e.evaluateTreeWorkflow(workflow, 0, nil)
+		})
+
+		select {
+		case <-stopCh:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 // LoadAll loads all enabled workflows from database and builds the registry
 func (e *WorkflowEngine) LoadAll() error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	// Clear existing registry
+	for _, stopCh := range e.startLoopStops {
+		close(stopCh)
+	}
 	e.workflowsByParam = make(map[uint][]*domain.Workflow)
 	e.workflowsBySetPt = make(map[uint][]*domain.Workflow)
 	e.debounceMap = make(map[uint]time.Time)
+	e.workflowRunning = make(map[uint]bool)
+	e.startLoopStops = make(map[uint]chan struct{})
 
 	// Load all enabled workflows
 	workflows, err := e.workflowRepo.GetAll()
 	if err != nil {
+		e.mu.Unlock()
 		return fmt.Errorf("failed to load workflows: %w", err)
 	}
+
+	type startRunner struct {
+		workflow *domain.Workflow
+		stopCh   chan struct{}
+	}
+	startTriggeredWorkflows := make([]startRunner, 0)
 
 	// Build registry: parameter_id -> workflows that monitor it
 	for i := range workflows {
@@ -109,6 +162,14 @@ func (e *WorkflowEngine) LoadAll() error {
 			if err := json.Unmarshal([]byte(*workflow.TreeData), &tree); err == nil {
 				if tree.Trigger != nil {
 					switch tree.Trigger.Type {
+					case domain.TriggerTypeStart:
+						// START workflows run continuously with non-overlap execution.
+						stopCh := make(chan struct{})
+						e.startLoopStops[workflow.ID] = stopCh
+						startTriggeredWorkflows = append(startTriggeredWorkflows, startRunner{
+							workflow: workflow,
+							stopCh:   stopCh,
+						})
 					case domain.TriggerTypeParameterChanged:
 						// Register workflows that monitor parameter changes
 						e.workflowsByParam[tree.Trigger.SourceID] = append(e.workflowsByParam[tree.Trigger.SourceID], workflow)
@@ -119,6 +180,13 @@ func (e *WorkflowEngine) LoadAll() error {
 				}
 			}
 		}
+	}
+
+	e.mu.Unlock()
+
+	// Start continuous START trigger loops after registry lock is released.
+	for _, runner := range startTriggeredWorkflows {
+		go e.runStartTriggerLoop(runner.workflow, runner.stopCh)
 	}
 
 	return nil
@@ -140,14 +208,14 @@ func (e *WorkflowEngine) OnParameterUpdated(parameterID uint, data *domain.Realt
 		// Route to appropriate execution based on version
 		if workflow.Version == domain.WorkflowVersionTree {
 			// Version 2: Tree-based execution
-			if err := e.evaluateTreeWorkflow(workflow, parameterID, data); err != nil {
-				// Silent fail
-			}
+			e.runWorkflowIfIdle(workflow.ID, func() error {
+				return e.evaluateTreeWorkflow(workflow, parameterID, data)
+			})
 		} else {
 			// Version 1: Flat execution (backward compatibility)
-			if err := e.evaluateWorkflow(workflow, parameterID, data); err != nil {
-				// Silent fail
-			}
+			e.runWorkflowIfIdle(workflow.ID, func() error {
+				return e.evaluateWorkflow(workflow, parameterID, data)
+			})
 		}
 	}
 }
@@ -197,8 +265,9 @@ func (e *WorkflowEngine) OnSetPointChanged(setPointID uint) {
 			// For set-point triggered workflows, updatedParamID is not relevant,
 			// so we pass 0 and nil for data. evaluateTreeWorkflow will skip the
 			// parameterID check because the trigger type is SETPOINT_CHANGED.
-			// Silent fail on evaluation errors for set-point workflows
-			_ = e.evaluateTreeWorkflow(workflow, 0, nil)
+			e.runWorkflowIfIdle(workflow.ID, func() error {
+				return e.evaluateTreeWorkflow(workflow, 0, nil)
+			})
 		}
 	}
 }
@@ -633,12 +702,14 @@ func (e *WorkflowEngine) evaluateTreeWorkflow(workflow *domain.Workflow, updated
 		return nil // Not triggered by this parameter
 	}
 
-	// Check debounce
-	e.mu.RLock()
-	lastExec, exists := e.debounceMap[workflow.ID]
-	e.mu.RUnlock()
-	if exists && time.Since(lastExec) < e.debounceWindow {
-		return nil
+	// Check debounce (START trigger should run continuously, so debounce is skipped)
+	if tree.Trigger.Type != domain.TriggerTypeStart {
+		e.mu.RLock()
+		lastExec, exists := e.debounceMap[workflow.ID]
+		e.mu.RUnlock()
+		if exists && time.Since(lastExec) < e.debounceWindow {
+			return nil
+		}
 	}
 
 	// Get workflow state for edge trigger
@@ -677,7 +748,7 @@ func (e *WorkflowEngine) evaluateTreeWorkflow(workflow *domain.Workflow, updated
 		e.mu.Unlock()
 
 		// Execute root node recursively
-		if err := e.executeTreeNode(workflow.ID, workflow, tree.Root, 0); err != nil {
+		if err := e.executeTreeNode(workflow.ID, workflow, tree.Root, nil, 0); err != nil {
 			return fmt.Errorf("failed to execute tree workflow %d: %w", workflow.ID, err)
 		}
 	}
@@ -886,8 +957,83 @@ func (e *WorkflowEngine) getValueFromSource(source *domain.ValueSource) (float64
 	}
 }
 
-// executeTreeNode executes a tree node recursively
-func (e *WorkflowEngine) executeTreeNode(workflowID uint, workflow *domain.Workflow, node *domain.TreeNode, depth int) error {
+// actionRetrySettings reads optional retry fields from action_data (set by workflow UI).
+// extraAttempts: number of additional tries after the first failure (capped).
+// delaySeconds: pause before each retry attempt (after the first failure).
+// rerunPrevious: before each retry, re-run the immediate parent node if it is an action (action chaining).
+func actionRetrySettings(data map[string]interface{}) (extraAttempts int, delaySeconds int, rerunPrevious bool) {
+	if data == nil {
+		return 0, 0, false
+	}
+	switch v := data["retry_count"].(type) {
+	case float64:
+		extraAttempts = int(v)
+	case int:
+		extraAttempts = v
+	}
+	if extraAttempts < 0 {
+		extraAttempts = 0
+	}
+	if extraAttempts > 20 {
+		extraAttempts = 20
+	}
+	switch v := data["retry_delay_seconds"].(type) {
+	case float64:
+		delaySeconds = int(v)
+	case int:
+		delaySeconds = v
+	}
+	// Backward compatibility for old payloads still using milliseconds.
+	if delaySeconds == 0 {
+		switch v := data["retry_delay_ms"].(type) {
+		case float64:
+			delaySeconds = int(v / 1000)
+		case int:
+			delaySeconds = v / 1000
+		}
+	}
+	if delaySeconds < 0 {
+		delaySeconds = 0
+	}
+	if delaySeconds > 600 { // 10 minutes
+		delaySeconds = 600
+	}
+	if b, ok := data["retry_rerun_previous"].(bool); ok {
+		rerunPrevious = b
+	}
+	return extraAttempts, delaySeconds, rerunPrevious
+}
+
+// executeActionWithRetry runs executeTreeAction with optional retries; on each retry after failure,
+// optionally re-executes the immediate predecessor action (parent) when parent.Type == "action".
+func (e *WorkflowEngine) executeActionWithRetry(workflowID uint, workflow *domain.Workflow, node *domain.TreeNode, parent *domain.TreeNode) error {
+	extra, delaySeconds, rerunPrev := actionRetrySettings(node.ActionData)
+	maxAttempts := 1 + extra
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			if delaySeconds > 0 {
+				time.Sleep(time.Duration(delaySeconds) * time.Second)
+			}
+			if rerunPrev && parent != nil && parent.Type == "action" {
+				if err := e.executeTreeAction(workflowID, workflow, parent); err != nil {
+					lastErr = err
+					continue
+				}
+			}
+		}
+		if err := e.executeTreeAction(workflowID, workflow, node); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+// executeTreeNode executes a tree node recursively.
+// parent is the immediate tree predecessor (IF, timer, or action) used for action retry "re-run previous".
+func (e *WorkflowEngine) executeTreeNode(workflowID uint, workflow *domain.Workflow, node *domain.TreeNode, parent *domain.TreeNode, depth int) error {
 	if depth > workflowExecutionMaxDepth { // Max depth safety
 		return fmt.Errorf("max depth exceeded")
 	}
@@ -897,14 +1043,13 @@ func (e *WorkflowEngine) executeTreeNode(workflowID uint, workflow *domain.Workf
 	}
 
 	if node.Type == "action" {
-		// Execute action
-		if err := e.executeTreeAction(workflowID, workflow, node); err != nil {
+		if err := e.executeActionWithRetry(workflowID, workflow, node, parent); err != nil {
 			return err
 		}
 
-		// Execute THEN branch for action chaining (sequential actions)
-		for _, child := range node.Then {
-			if err := e.executeTreeNode(workflowID, workflow, &child, depth+1); err != nil {
+		for i := range node.Then {
+			child := &node.Then[i]
+			if err := e.executeTreeNode(workflowID, workflow, child, node, depth+1); err != nil {
 				// Continue with next child even if current one fails
 			}
 		}
@@ -913,12 +1058,10 @@ func (e *WorkflowEngine) executeTreeNode(workflowID uint, workflow *domain.Workf
 	}
 
 	if node.Type == "timer" {
-		// Execute timer delay
 		if node.TimerData == nil {
 			return fmt.Errorf("timer node has no timer_data")
 		}
 
-		// Calculate delay duration
 		var delay time.Duration
 		switch node.TimerData.Unit {
 		case "seconds":
@@ -931,13 +1074,11 @@ func (e *WorkflowEngine) executeTreeNode(workflowID uint, workflow *domain.Workf
 			return fmt.Errorf("invalid timer unit: %s", node.TimerData.Unit)
 		}
 
-		// Sleep for the specified duration
-		// This blocks the workflow execution thread
 		time.Sleep(delay)
 
-		// Execute THEN branch to continue to next node
-		for _, child := range node.Then {
-			if err := e.executeTreeNode(workflowID, workflow, &child, depth+1); err != nil {
+		for i := range node.Then {
+			child := &node.Then[i]
+			if err := e.executeTreeNode(workflowID, workflow, child, node, depth+1); err != nil {
 				// Continue with next child even if current one fails
 			}
 		}
@@ -950,21 +1091,19 @@ func (e *WorkflowEngine) executeTreeNode(workflowID uint, workflow *domain.Workf
 			return fmt.Errorf("IF node has no condition")
 		}
 
-		// Evaluate condition
 		conditionMet := e.evaluateTreeCondition(node.Condition)
 
-		// Execute appropriate branch
 		if conditionMet {
-			// Execute THEN branch
-			for _, child := range node.Then {
-				if err := e.executeTreeNode(workflowID, workflow, &child, depth+1); err != nil {
+			for i := range node.Then {
+				child := &node.Then[i]
+				if err := e.executeTreeNode(workflowID, workflow, child, node, depth+1); err != nil {
 					// Continue with next child even if current one fails
 				}
 			}
 		} else {
-			// Execute ELSE branch
-			for _, child := range node.Else {
-				if err := e.executeTreeNode(workflowID, workflow, &child, depth+1); err != nil {
+			for i := range node.Else {
+				child := &node.Else[i]
+				if err := e.executeTreeNode(workflowID, workflow, child, node, depth+1); err != nil {
 					// Continue with next child even if current one fails
 				}
 			}

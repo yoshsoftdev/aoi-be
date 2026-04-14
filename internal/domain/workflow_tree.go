@@ -18,7 +18,7 @@ type NodePosition struct {
 
 // TriggerNode represents the trigger for a workflow
 type TriggerNode struct {
-	Type      string  `json:"type"`                // "PARAMETER_CHANGED", "SETPOINT_CHANGED"
+	Type      string  `json:"type"`                // "START", "PARAMETER_CHANGED", "SETPOINT_CHANGED"
 	SourceID  uint    `json:"source_id"`           // parameter_id or setpoint_id
 	Parameter *string `json:"parameter,omitempty"` // parameter name (optional, for display)
 }
@@ -81,6 +81,7 @@ const (
 
 // Trigger types constants
 const (
+	TriggerTypeStart            = "START"
 	TriggerTypeParameterChanged = "PARAMETER_CHANGED"
 	TriggerTypeSetpointChanged  = "SETPOINT_CHANGED"
 )

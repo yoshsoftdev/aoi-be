@@ -464,11 +464,13 @@ func validateWorkflowTree(tree *domain.WorkflowTree) error {
 		return fmt.Errorf("trigger is required")
 	}
 
-	if tree.Trigger.Type != domain.TriggerTypeParameterChanged && tree.Trigger.Type != domain.TriggerTypeSetpointChanged {
+	if tree.Trigger.Type != domain.TriggerTypeStart &&
+		tree.Trigger.Type != domain.TriggerTypeParameterChanged &&
+		tree.Trigger.Type != domain.TriggerTypeSetpointChanged {
 		return fmt.Errorf("invalid trigger type: %s", tree.Trigger.Type)
 	}
 
-	if tree.Trigger.SourceID == 0 {
+	if tree.Trigger.Type != domain.TriggerTypeStart && tree.Trigger.SourceID == 0 {
 		return fmt.Errorf("trigger source_id is required")
 	}
 
