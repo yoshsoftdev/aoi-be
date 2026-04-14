@@ -13,6 +13,8 @@ import (
 	"aoi-backend/internal/repository"
 )
 
+const workflowExecutionMaxDepth = 20
+
 // WorkflowEngine manages workflow evaluation and execution
 // Workflow hanya bekerja pada parameter_id, tidak tahu register/slave/address
 // Workflow dievaluasi SETELAH data READ bersih (setelah formula engine)
@@ -688,7 +690,7 @@ func (e *WorkflowEngine) evaluateTreeWorkflow(workflow *domain.Workflow, updated
 // - shouldExecute: whether actions under this node should execute (based on edgeTrigger)
 // - conditionMet: whether any condition in this subtree is currently true
 func (e *WorkflowEngine) evaluateTreeNode(node *domain.TreeNode, state *domain.WorkflowState, depth int, edgeTrigger bool) (bool, bool) {
-	if depth > 10 { // Max depth safety
+	if depth > workflowExecutionMaxDepth { // Max depth safety
 		return false, false
 	}
 
@@ -886,7 +888,7 @@ func (e *WorkflowEngine) getValueFromSource(source *domain.ValueSource) (float64
 
 // executeTreeNode executes a tree node recursively
 func (e *WorkflowEngine) executeTreeNode(workflowID uint, workflow *domain.Workflow, node *domain.TreeNode, depth int) error {
-	if depth > 10 { // Max depth safety
+	if depth > workflowExecutionMaxDepth { // Max depth safety
 		return fmt.Errorf("max depth exceeded")
 	}
 

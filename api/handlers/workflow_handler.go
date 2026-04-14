@@ -15,6 +15,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const workflowTreeMaxDepth = 20
+
 type WorkflowHandler struct {
 	workflowRepo   repository.WorkflowRepository
 	workflowEngine *service.WorkflowEngine
@@ -452,7 +454,7 @@ func (h *WorkflowHandler) Delete(c *gin.Context) {
 }
 
 // validateWorkflowTree validates a workflow tree structure
-// Checks: max depth (10), no loops, valid structure
+// Checks: max depth (20), no loops, valid structure
 func validateWorkflowTree(tree *domain.WorkflowTree) error {
 	if tree == nil {
 		return fmt.Errorf("tree is nil")
@@ -476,7 +478,7 @@ func validateWorkflowTree(tree *domain.WorkflowTree) error {
 
 	// Validate tree structure recursively
 	visited := make(map[string]bool)
-	if err := validateTreeNode(tree.Root, 0, 10, visited); err != nil {
+	if err := validateTreeNode(tree.Root, 0, workflowTreeMaxDepth, visited); err != nil {
 		return err
 	}
 
