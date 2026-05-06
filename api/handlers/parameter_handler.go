@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"aoi-backend/internal/core/errors"
@@ -20,6 +21,42 @@ type ParameterHandler struct {
 	writeService     *service.WriteService
 	schedulerManager *scheduler.SchedulerManager
 	formulaEngine    *service.FormulaEngine
+}
+
+type parameterPayload struct {
+	domain.Parameter
+	ReadWriteRaw any `json:"read_write"`
+}
+
+func normalizeReadWrite(raw any, fallback int) (int, error) {
+	if raw == nil {
+		return fallback, nil
+	}
+	switch v := raw.(type) {
+	case bool:
+		if v {
+			return 1, nil
+		}
+		return 0, nil
+	case float64:
+		return int(v), nil
+	case int:
+		return v, nil
+	case string:
+		s := strings.TrimSpace(strings.ToUpper(v))
+		switch s {
+		case "0", "READ", "FALSE":
+			return 0, nil
+		case "1", "WRITE", "TRUE":
+			return 1, nil
+		case "2", "READ_WRITE":
+			return 2, nil
+		default:
+			return 0, fmt.Errorf("invalid read_write string: %s", v)
+		}
+	default:
+		return 0, fmt.Errorf("invalid read_write type: %T", raw)
+	}
 }
 
 func NewParameterHandler(service service.ParameterService, writeService *service.WriteService, schedulerManager *scheduler.SchedulerManager, formulaEngine *service.FormulaEngine) *ParameterHandler {
@@ -93,14 +130,24 @@ func (h *ParameterHandler) GetByID(c *gin.Context) {
 }
 
 func (h *ParameterHandler) Create(c *gin.Context) {
-	var param domain.Parameter
-	if err := c.ShouldBindJSON(&param); err != nil {
+	var payload parameterPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
 			"error":   err.Error(),
 		})
 		return
 	}
+	param := payload.Parameter
+	readWrite, err := normalizeReadWrite(payload.ReadWriteRaw, param.ReadWrite)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	param.ReadWrite = readWrite
 
 	// Validate write_mode for WRITE parameters
 	if param.Direction == "WRITE" {
@@ -207,14 +254,24 @@ func (h *ParameterHandler) Update(c *gin.Context) {
 		return
 	}
 
-	var param domain.Parameter
-	if err := c.ShouldBindJSON(&param); err != nil {
+	var payload parameterPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
 			"error":   err.Error(),
 		})
 		return
 	}
+	param := payload.Parameter
+	readWrite, err := normalizeReadWrite(payload.ReadWriteRaw, param.ReadWrite)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	param.ReadWrite = readWrite
 
 	// Validate write_mode for WRITE parameters
 	if param.Direction == "WRITE" {
