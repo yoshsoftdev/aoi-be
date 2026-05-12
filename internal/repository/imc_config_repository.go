@@ -26,7 +26,7 @@ func NewIMCConfigRepository() IMCConfigRepository {
 
 func (r *imcConfigRepository) GetAll() ([]domain.IMCParameterConfig, error) {
 	var configs []domain.IMCParameterConfig
-	if err := r.db.Preload("Parameter").Find(&configs).Error; err != nil {
+	if err := r.db.Preload("Parameter").Preload("SetPoint").Find(&configs).Error; err != nil {
 		return nil, err
 	}
 	return configs, nil
@@ -34,7 +34,7 @@ func (r *imcConfigRepository) GetAll() ([]domain.IMCParameterConfig, error) {
 
 func (r *imcConfigRepository) GetByCardKey(cardKey string) (*domain.IMCParameterConfig, error) {
 	var config domain.IMCParameterConfig
-	if err := r.db.Preload("Parameter").Where("card_key = ?", cardKey).First(&config).Error; err != nil {
+	if err := r.db.Preload("Parameter").Preload("SetPoint").Where("card_key = ?", cardKey).First(&config).Error; err != nil {
 		return nil, err
 	}
 	return &config, nil
@@ -53,7 +53,9 @@ func (r *imcConfigRepository) CreateOrUpdate(config *domain.IMCParameterConfig) 
 	}
 	
 	// Update existing
+	existing.SourceType = config.SourceType
 	existing.ParameterID = config.ParameterID
+	existing.SetPointID = config.SetPointID
 	return r.db.Save(&existing).Error
 }
 

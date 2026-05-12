@@ -5,6 +5,8 @@ import (
 	"aoi-backend/internal/repository"
 	"context"
 	"fmt"
+	"math/rand"
+	"sync"
 	"time"
 )
 
@@ -14,6 +16,8 @@ type SetPointService struct {
 	repo           repository.SetPointRepository
 	bypassEngine   *BypassEngine
 	workflowEngine *WorkflowEngine
+	mu             sync.Mutex
+	randomStopCh   chan struct{}
 }
 
 func NewSetPointService(repo repository.SetPointRepository) *SetPointService {
@@ -47,6 +51,11 @@ func (s *SetPointService) Create(sp *domain.SetPoint) error {
 	if sp.MinValue != nil && sp.MaxValue != nil && *sp.MinValue > *sp.MaxValue {
 		return fmt.Errorf("min_value cannot be greater than max_value")
 	}
+	if sp.RandomEnabled {
+		if sp.MinValue == nil || sp.MaxValue == nil {
+			return fmt.Errorf("random_enabled requires min_value and max_value")
+		}
+	}
 	return s.repo.Create(sp)
 }
 
@@ -59,6 +68,11 @@ func (s *SetPointService) Update(sp *domain.SetPoint) error {
 
 	if sp.MinValue != nil && sp.MaxValue != nil && *sp.MinValue > *sp.MaxValue {
 		return fmt.Errorf("min_value cannot be greater than max_value")
+	}
+	if sp.RandomEnabled {
+		if sp.MinValue == nil || sp.MaxValue == nil {
+			return fmt.Errorf("random_enabled requires min_value and max_value")
+		}
 	}
 
 	// Update set-point
@@ -131,5 +145,76 @@ func (s *SetPointService) UpdateValue(ctx context.Context, setPointID uint, newV
 
 func (s *SetPointService) Delete(id uint) error {
 	return s.repo.Delete(id)
+}
+
+func (s *SetPointService) StartRandomUpdater() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.randomStopCh != nil {
+		return
+	}
+	s.randomStopCh = make(chan struct{})
+	go s.randomLoop(s.randomStopCh)
+}
+
+func (s *SetPointService) StopRandomUpdater() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.randomStopCh != nil {
+		close(s.randomStopCh)
+		s.randomStopCh = nil
+	}
+}
+
+func (s *SetPointService) randomLoop(stopCh <-chan struct{}) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-ticker.C:
+			s.applyRandomStep()
+		}
+	}
+}
+
+func (s *SetPointService) applyRandomStep() {
+	items, err := s.repo.GetAll()
+	if err != nil {
+		return
+	}
+	for _, sp := range items {
+		if !sp.RandomEnabled || sp.MinValue == nil || sp.MaxValue == nil {
+			continue
+		}
+		min := *sp.MinValue
+		max := *sp.MaxValue
+		if min >= max {
+			continue
+		}
+		step := 1.0
+		if max-min < step {
+			// kalau range kecil, pakai step pecahan agar tetap bergerak
+			step = (max - min) / 5.0
+			if step <= 0 {
+				continue
+			}
+		}
+		delta := rand.Float64() * step
+		if rand.Intn(2) == 0 {
+			delta = -delta
+		}
+		next := sp.Value + delta
+		if next < min {
+			next = min
+		}
+		if next > max {
+			next = max
+		}
+		if next != sp.Value {
+			_ = s.UpdateValue(context.Background(), sp.ID, next)
+		}
+	}
 }
 

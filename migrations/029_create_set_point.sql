@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS set_point (
     data_type VARCHAR(10) NOT NULL CHECK (data_type IN ('int', 'float', 'bool')),
     min_value REAL,
     max_value REAL,
+    random_enabled INTEGER DEFAULT 0,
+    random_step REAL,
     description TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP

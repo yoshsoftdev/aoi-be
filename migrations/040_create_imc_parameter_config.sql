@@ -4,11 +4,15 @@
 CREATE TABLE IF NOT EXISTS imc_parameter_config (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     card_key VARCHAR(100) NOT NULL UNIQUE,
+    source_type VARCHAR(20) NOT NULL DEFAULT 'parameter',
     parameter_id INTEGER,
+    set_point_id INTEGER,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (parameter_id) REFERENCES parameters(id) ON DELETE SET NULL
+    FOREIGN KEY (parameter_id) REFERENCES parameters(id) ON DELETE SET NULL,
+    FOREIGN KEY (set_point_id) REFERENCES set_point(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_imc_parameter_config_card_key ON imc_parameter_config(card_key);
 CREATE INDEX IF NOT EXISTS idx_imc_parameter_config_parameter_id ON imc_parameter_config(parameter_id);
+CREATE INDEX IF NOT EXISTS idx_imc_parameter_config_set_point_id ON imc_parameter_config(set_point_id);

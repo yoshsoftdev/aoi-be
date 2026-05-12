@@ -48,7 +48,9 @@ func (h *IMCConfigHandler) GetByCardKey(c *gin.Context) {
 
 type CreateOrUpdateIMCConfigRequest struct {
 	CardKey     string  `json:"card_key" binding:"required"`
+	SourceType  string  `json:"source_type"`
 	ParameterID *uint   `json:"parameter_id"`
+	SetPointID  *uint   `json:"set_point_id"`
 }
 
 func (h *IMCConfigHandler) CreateOrUpdate(c *gin.Context) {
@@ -61,7 +63,7 @@ func (h *IMCConfigHandler) CreateOrUpdate(c *gin.Context) {
 		return
 	}
 
-	if err := h.svc.CreateOrUpdate(req.CardKey, req.ParameterID); err != nil {
+	if err := h.svc.CreateOrUpdate(req.CardKey, req.SourceType, req.ParameterID, req.SetPointID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"error":   err.Error(),

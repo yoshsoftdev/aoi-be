@@ -192,6 +192,7 @@ func main() {
 	}
 
 	// Set-Point Service already initialized above for workflow engine
+	setPointService.StartRandomUpdater()
 
 	// Initialize Bypass Engine
 	bypassRepo := repository.NewBypassRepository()
@@ -326,12 +327,45 @@ func main() {
 	<-quit
 
 	log.Info("Shutting down server...")
+	setPointService.StopRandomUpdater()
 	schedulerManager.Stop()
 	log.Info("Server stopped")
 }
 
 func runMigrations() error {
 	db := database.GetDB()
+
+	// Ensure newer set_point columns exist (backward-compatible migration).
+	hasColumn := func(table, column string) bool {
+		var count int
+		db.Raw(fmt.Sprintf("SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = ?", table), column).Scan(&count)
+		return count > 0
+	}
+	tableExistsByName := func(table string) bool {
+		var count int
+		db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?", table).Scan(&count)
+		return count > 0
+	}
+	if !hasColumn("set_point", "random_enabled") {
+		if err := db.Exec("ALTER TABLE set_point ADD COLUMN random_enabled INTEGER DEFAULT 0").Error; err != nil {
+			return fmt.Errorf("failed to add set_point.random_enabled: %w", err)
+		}
+	}
+	if !hasColumn("set_point", "random_step") {
+		if err := db.Exec("ALTER TABLE set_point ADD COLUMN random_step REAL").Error; err != nil {
+			return fmt.Errorf("failed to add set_point.random_step: %w", err)
+		}
+	}
+	if !hasColumn("imc_parameter_config", "source_type") {
+		if err := db.Exec("ALTER TABLE imc_parameter_config ADD COLUMN source_type VARCHAR(20) DEFAULT 'parameter'").Error; err != nil {
+			return fmt.Errorf("failed to add imc_parameter_config.source_type: %w", err)
+		}
+	}
+	if !hasColumn("imc_parameter_config", "set_point_id") {
+		if err := db.Exec("ALTER TABLE imc_parameter_config ADD COLUMN set_point_id INTEGER").Error; err != nil {
+			return fmt.Errorf("failed to add imc_parameter_config.set_point_id: %w", err)
+		}
+	}
 
 	// Migration 043: Drop FK constraint on current_alarm.parameter_id
 	// This allows alarms for set-point triggered workflows (parameter_id=0)
@@ -411,7 +445,6 @@ func runMigrations() error {
 		&domain.ParameterFormula{},
 		&domain.ParameterFormulaVar{},
 		&domain.ParameterPreset{},
-		&domain.SetPoint{},
 		&domain.Workflow{},
 		&domain.WorkflowCondition{},
 		&domain.WorkflowAction{},
@@ -421,7 +454,16 @@ func runMigrations() error {
 		&domain.Bypass{},
 		&domain.BypassRule{},
 		&domain.BypassAction{},
-		&domain.IMCParameterConfig{},
+	}
+	// NOTE:
+	// Existing SQLite set_point table with manually altered columns can trigger
+	// GORM DDL parser issues. For existing table, we keep schema updates via
+	// explicit ALTER TABLE above and skip AutoMigrate for set_point.
+	if !tableExistsByName("set_point") {
+		tablesToMigrate = append(tablesToMigrate, &domain.SetPoint{})
+	}
+	if !tableExistsByName("imc_parameter_config") {
+		tablesToMigrate = append(tablesToMigrate, &domain.IMCParameterConfig{})
 	}
 
 	// Only add CurrentAlarm if migration 043 was not just applied

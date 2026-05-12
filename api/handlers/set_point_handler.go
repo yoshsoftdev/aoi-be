@@ -72,6 +72,7 @@ type createSetPointRequest struct {
 	DataType    string   `json:"data_type"`
 	MinValue    *float64 `json:"min_value"`
 	MaxValue    *float64 `json:"max_value"`
+	RandomEnabled bool   `json:"random_enabled"`
 	Description *string  `json:"description"`
 }
 
@@ -96,6 +97,7 @@ func (h *SetPointHandler) Create(c *gin.Context) {
 		DataType:    req.DataType,
 		MinValue:    req.MinValue,
 		MaxValue:    req.MaxValue,
+		RandomEnabled: req.RandomEnabled,
 		Description: req.Description,
 	}
 	if err := h.svc.Create(item); err != nil {
@@ -118,6 +120,7 @@ type updateSetPointRequest struct {
 	DataType    *string  `json:"data_type"`
 	MinValue    *float64 `json:"min_value"`
 	MaxValue    *float64 `json:"max_value"`
+	RandomEnabled *bool  `json:"random_enabled"`
 	Description *string  `json:"description"`
 }
 
@@ -162,6 +165,7 @@ func (h *SetPointHandler) Update(c *gin.Context) {
 		DataType:    existing.DataType,
 		MinValue:    existing.MinValue,
 		MaxValue:    existing.MaxValue,
+		RandomEnabled: existing.RandomEnabled,
 		Description: existing.Description,
 	}
 
@@ -186,6 +190,9 @@ func (h *SetPointHandler) Update(c *gin.Context) {
 	}
 	if req.MaxValue != nil {
 		item.MaxValue = req.MaxValue
+	}
+	if req.RandomEnabled != nil {
+		item.RandomEnabled = *req.RandomEnabled
 	}
 	if req.Description != nil {
 		item.Description = req.Description
